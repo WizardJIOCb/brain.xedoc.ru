@@ -11,6 +11,7 @@ import { IngestModule } from './ingest/ingest.module';
 import { SearchModule } from './search/search.module';
 import { FactsModule } from './facts/facts.module';
 import { EntitiesModule } from './entities/entities.module';
+import { McpModule } from './mcp/mcp.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { EntitiesModule } from './entities/entities.module';
     SearchModule,
     FactsModule,
     EntitiesModule,
+    McpModule,
   ],
   controllers: [HealthController],
   providers: [
