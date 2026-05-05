@@ -16,6 +16,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:e2e:real": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand",
     "schema:apply": "ts-node -r tsconfig-paths/register scripts/apply-schema.ts"
   },
   "dependencies": {
@@ -36,6 +37,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@inite/knowledge": "file:/Users/mikefluff/Documents/inite-shared/packages/knowledge",
     "@nestjs/cli": "^11.0.7",
     "@nestjs/schematics": "^11.0.5",
     "@nestjs/testing": "^11.1.9",
