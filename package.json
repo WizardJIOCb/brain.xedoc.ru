@@ -16,7 +16,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "test:e2e:real": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand",
+    "test:e2e:real": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=brain.real",
+    "test:eval": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=quality",
     "schema:apply": "ts-node -r tsconfig-paths/register scripts/apply-schema.ts"
   },
   "dependencies": {

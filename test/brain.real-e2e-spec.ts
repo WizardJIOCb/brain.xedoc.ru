@@ -11,7 +11,7 @@
 import { BrainClient } from '@inite/knowledge';
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { spawnService, SpawnedService } from './spawn-service';
+import { spawnService, SpawnedService } from './spawn';
 
 describe('Real e2e (separate process + real OpenAI + SDK + MCP)', () => {
   let svc: SpawnedService;
@@ -19,7 +19,7 @@ describe('Real e2e (separate process + real OpenAI + SDK + MCP)', () => {
 
   beforeAll(async () => {
     svc = await spawnService();
-    brain = new BrainClient({ baseUrl: svc.baseUrl, apiKey: svc.apiKey });
+    brain = new BrainClient({ baseUrl: svc.baseUrl, apiKey: svc.primary.plaintext });
   }, 60_000);
 
   afterAll(async () => {
@@ -85,7 +85,7 @@ describe('Real e2e (separate process + real OpenAI + SDK + MCP)', () => {
     const url = new URL(`${svc.baseUrl}/mcp/${svc.companyId}`);
     const transport = new StreamableHTTPClientTransport(url, {
       requestInit: {
-        headers: { Authorization: `Bearer ${svc.apiKey}` },
+        headers: { Authorization: `Bearer ${svc.primary.plaintext}` },
       },
     });
     const client = new McpClient({ name: 'real-e2e-test', version: '0.0.1' });

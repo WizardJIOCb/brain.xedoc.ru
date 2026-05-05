@@ -286,14 +286,13 @@ export class IngestService {
       const fromId = await this.resolveOrCreateBareRef(db, dto.from as any);
       const toId = await this.resolveOrCreateBareRef(db, dto.to as any);
 
-      // RELATE in SurrealDB graph table
-      const [edgeRows] = await db.query<any[][]>(
-        `RELATE type::thing('knowledge_entity', $f)->knowledge_edge->type::thing('knowledge_entity', $t)
-         CONTENT { kind: $kind, weight: $weight, source: $source }
-         RETURN AFTER`,
+      // RELATE in SurrealDB graph table. v2 expects record-link bindings
+      // for the `from` and `to` operands, not raw strings.
+      const [edgeRows] = await db.query<[any[]]>(
+        `RELATE $from->knowledge_edge->$to CONTENT { kind: $kind, weight: $weight, source: $source } RETURN AFTER`,
         {
-          f: this.idTail(fromId),
-          t: this.idTail(toId),
+          from: new StringRecordId(fromId),
+          to: new StringRecordId(toId),
           kind: dto.kind,
           weight: dto.weight ?? 1.0,
           source: dto.source,
