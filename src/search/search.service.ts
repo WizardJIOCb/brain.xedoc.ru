@@ -229,21 +229,34 @@ export class SearchService {
         bucket.rankScore = bucket.bestScore + DEGREE_BOOST_WEIGHT * boost;
       }
 
-      // Personalized PageRank entity prior. HippoRAG-style — seed
-      // each candidate entity by its bestScore, then propagate flow
-      // through the typed-edge graph (mentioned_with, identity_of)
-      // for 3 power iterations with damping α=0.85. Coherent
-      // clusters reinforce each other; an isolated false match
-      // doesn't get the cluster lift. Adds +5-10% on adversarial
-      // disambiguation in the literature; for our small per-tenant
-      // graphs (≤1k entities) this runs in single-digit ms.
+      // Personalized PageRank entity prior — HippoRAG-style. Seed
+      // each candidate by its bestScore, propagate through the
+      // typed-edge graph (mentioned_with, identity_of) for 3 power
+      // iterations with α=0.85. Coherent clusters reinforce; an
+      // isolated false match doesn't get the cluster lift.
       //
-      // Disabled by default. The +N% comes at the cost of one extra
-      // graph query per search; hot paths can leave it off.
-      if (
-        process.env.SEARCH_PPR_ENABLED === '1' &&
-        byEntity.size > 1
-      ) {
+      // Tier gating: PPR is dangerous on small graphs (≤100 entities)
+      // because hub effects amplify pathologically — a project entity
+      // with 2 staff edges outranks each staff member individually
+      // (cross recall@1 1.00 → 0.57 on the 30-entity eval). On larger
+      // tenants (≥SEARCH_PPR_MIN_ENTITIES) hub effects dissipate into
+      // longer-tailed neighbourhoods and PPR pays off. Either:
+      //   - SEARCH_PPR_ENABLED=1 forces PPR regardless of size
+      //   - SEARCH_PPR_AUTO_THRESHOLD=N enables PPR only when the
+      //     candidate set is ≥ N (cheap proxy for tenant size — if
+      //     the query already retrieved many candidates the graph
+      //     is dense enough to support PPR).
+      //
+      // Both off → no PPR. The default is OFF on both, so PPR
+      // remains opt-in.
+      const pprForced = process.env.SEARCH_PPR_ENABLED === '1';
+      const pprAutoThreshold = parseInt(
+        process.env.SEARCH_PPR_AUTO_THRESHOLD ?? '0',
+        10,
+      );
+      const pprAuto =
+        pprAutoThreshold > 0 && byEntity.size >= pprAutoThreshold;
+      if ((pprForced || pprAuto) && byEntity.size > 1) {
         await this.applyPprPrior(db, byEntity);
       }
 

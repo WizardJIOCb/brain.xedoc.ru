@@ -13,9 +13,17 @@ export interface RerankCandidate {
 /**
  * Listwise re-ranker. Takes a query and an ordered list of fused
  * candidates and returns a permutation of indices in descending
- * relevance order. Single LLM call (RankGPT-style prompt) — joint
- * scoring of (query, candidate) lets the model encode IS-A and
- * predicate-class semantics that pooled embeddings miss.
+ * relevance order. RankGPT-style prompt — joint scoring of
+ * (query, candidate) lets the model encode IS-A and predicate-class
+ * semantics that pooled embeddings miss.
+ *
+ * Permutation Self-Consistency (Tang et al., NAACL 2024):
+ * SEARCH_RERANKER_SC_N controls the number of parallel calls.
+ * When >1, each call sees the candidates in a different shuffled
+ * order; we aggregate the rankings via Borda count. Marginalises
+ * out positional bias and run-to-run jitter at the cost of N×
+ * tokens (latency stays roughly constant — the calls fire in
+ * parallel through the limiter).
  *
  * Disabled by default. Enable with SEARCH_RERANKER_ENABLED=1 + an
  * OpenAI key. On any failure (timeout, malformed output, partial
@@ -29,6 +37,7 @@ export class RerankerService {
   private readonly model: string;
   private readonly enabled: boolean;
   private readonly limiter: Semaphore;
+  private readonly scN: number;
 
   constructor(private readonly configService: ConfigService) {
     this.enabled =
@@ -57,6 +66,14 @@ export class RerankerService {
         10,
       ),
     );
+    // SC_N: number of parallel rerank calls used for permutation
+    // self-consistency. 1 = no SC (single call). 3-5 are common
+    // in the literature; 3 is the standard default for cost.
+    const rawN = parseInt(
+      this.configService.get<string>('SEARCH_RERANKER_SC_N', '1'),
+      10,
+    );
+    this.scN = Number.isFinite(rawN) && rawN > 0 ? rawN : 1;
   }
 
   isEnabled(): boolean {
@@ -65,11 +82,13 @@ export class RerankerService {
 
   /**
    * Re-rank the candidates against the query. Returns a permutation
-   * of `[0..candidates.length)` in descending-relevance order. On
-   * any failure or when disabled, returns the identity permutation.
+   * of `[0..candidates.length)` in descending-relevance order.
    *
-   * Skip when ≤1 candidate or query is empty — no re-ranking work
-   * to do, no LLM call worth paying for.
+   * SC mode (scN > 1): runs scN calls in parallel, each with a
+   * different shuffled candidate order, aggregates via Borda count.
+   * Falls back to identity on any catastrophic failure.
+   *
+   * Skip when ≤1 candidate or query is empty.
    */
   async rerank(query: string, candidates: RerankCandidate[]): Promise<number[]> {
     const identity = candidates.map((_, i) => i);
@@ -77,8 +96,52 @@ export class RerankerService {
       return identity;
     }
 
-    const items = candidates
-      .map((c, i) => `[${i}] ${c.label}\n${c.body}`)
+    if (this.scN === 1) {
+      // Single-call path. Identity ordering — no shuffle.
+      return this.singleRerank(query, candidates, identity);
+    }
+
+    // Permutation self-consistency: run scN calls in parallel with
+    // different shuffled orderings and aggregate via Borda count.
+    // Each call sees a unique shuffle of [0..N); the call returns a
+    // permutation in the SHUFFLED space, which singleRerank then
+    // maps back to parent indices before returning.
+    const orderings = Array.from({ length: this.scN }, () =>
+      shuffle(candidates.map((_, i) => i)),
+    );
+    const settled = await Promise.allSettled(
+      orderings.map((ord) => this.singleRerank(query, candidates, ord)),
+    );
+    const rankings: number[][] = [];
+    for (const s of settled) {
+      if (s.status === 'fulfilled' && s.value.length === candidates.length) {
+        rankings.push(s.value);
+      }
+    }
+    if (rankings.length === 0) return identity;
+    if (rankings.length === 1) return rankings[0];
+    return bordaAggregate(rankings, candidates.length);
+  }
+
+  /**
+   * Single rerank call. `presentationOrder` defines the order in
+   * which candidates are listed in the prompt — typically identity
+   * for non-SC mode, or a random permutation for SC. The returned
+   * array is in PARENT index space (i.e. mapped back through
+   * presentationOrder), so callers don't have to know about the
+   * shuffle.
+   */
+  private async singleRerank(
+    query: string,
+    candidates: RerankCandidate[],
+    presentationOrder: number[],
+  ): Promise<number[]> {
+    const identity = candidates.map((_, i) => i);
+    const items = presentationOrder
+      .map((parentIdx, presIdx) => {
+        const c = candidates[parentIdx];
+        return `[${presIdx}] ${c.label}\n${c.body}`;
+      })
       .join('\n\n');
     const systemPrompt = `You are a relevance ranker for a knowledge-graph search system. Given a user query and a list of candidate entities (each with a label and a short summary of facts), reorder the candidates from MOST to LEAST relevant to the query.
 
@@ -95,10 +158,6 @@ Return ONLY a JSON object of the shape {"ranking": [<index>, ...]} listing every
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          // Strict JSON schema: ranking must be an integer array.
-          // We cap minItems/maxItems via runtime validation rather
-          // than schema (json_schema enum doesn't accept dynamic
-          // sizes per call).
           response_format: {
             type: 'json_schema',
             json_schema: {
@@ -125,27 +184,60 @@ Return ONLY a JSON object of the shape {"ranking": [<index>, ...]} listing every
       const content = res.choices[0]?.message?.content;
       if (!content) return identity;
       const parsed = JSON.parse(content);
-      const ranking: unknown = parsed?.ranking;
-      if (!Array.isArray(ranking)) return identity;
+      const presentationRanking: unknown = parsed?.ranking;
+      if (!Array.isArray(presentationRanking)) return identity;
 
-      // Validate: must be a permutation of [0..N) with no duplicates,
-      // no out-of-range indices, and the same length. Anything off and
-      // we fall back to the original order rather than emit a
-      // partially-rewritten ranking that drops or duplicates results.
+      // Validate: must be a permutation of [0..N) in PRESENTATION
+      // index space. Map each entry back through presentationOrder
+      // to get the parent index.
       const seen = new Set<number>();
-      const validated: number[] = [];
-      for (const x of ranking) {
+      const validatedParentIdx: number[] = [];
+      for (const x of presentationRanking) {
         if (typeof x !== 'number' || !Number.isInteger(x)) return identity;
         if (x < 0 || x >= candidates.length) return identity;
         if (seen.has(x)) return identity;
         seen.add(x);
-        validated.push(x);
+        validatedParentIdx.push(presentationOrder[x]);
       }
-      if (validated.length !== candidates.length) return identity;
-      return validated;
+      if (validatedParentIdx.length !== candidates.length) return identity;
+      return validatedParentIdx;
     } catch (err) {
       this.logger.warn(`Reranker failed, falling back: ${(err as Error).message}`);
       return identity;
     }
   }
+}
+
+/**
+ * Fisher-Yates in-place shuffle. Math.random is fine for the
+ * positional-bias marginalisation; we don't need cryptographic
+ * randomness here.
+ */
+function shuffle<T>(xs: T[]): T[] {
+  const out = [...xs];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/**
+ * Borda count aggregation over multiple rank lists.
+ * Each rank list is a permutation of [0..N) in descending-relevance
+ * order. A candidate at position k in a list earns (N-k) points.
+ * Sum across all lists; sort by total points desc → final
+ * permutation. Stable on ties (lower parent index wins).
+ */
+function bordaAggregate(rankings: number[][], n: number): number[] {
+  const points = new Array<number>(n).fill(0);
+  for (const rank of rankings) {
+    for (let pos = 0; pos < rank.length; pos++) {
+      const candidate = rank[pos];
+      points[candidate] += n - pos;
+    }
+  }
+  const indexed = Array.from({ length: n }, (_, i) => ({ idx: i, score: points[i] }));
+  indexed.sort((a, b) => b.score - a.score || a.idx - b.idx);
+  return indexed.map((x) => x.idx);
 }
