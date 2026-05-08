@@ -17,6 +17,7 @@ import {
  *   - ingest_facts_total{outcome}             — INSERTED|SUPERSEDED|COMPETING|REJECTED
  *   - ingest_mentions_total{result}           — extracted|skipped|failed
  *   - search_duration_seconds                 — histogram, buckets tuned for ~ms-to-1s
+ *   - search_rerank_total{outcome}            — invoked|skipped_disabled|skipped_singleton|skipped_margin
  *   - retract_total / forget_total            — counters
  *   - compaction_facts_total                  — counter, summed across tenants
  *   - openai_tokens_total{kind, type}         — embed|chat × prompt|completion
@@ -48,6 +49,21 @@ export class MetricsService implements OnModuleInit {
     name: 'brain_search_duration_seconds',
     help: 'Search latency in seconds',
     buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+    registers: [this.registry],
+  });
+
+  // Outcomes:
+  //   invoked          — reranker actually ran on the candidate set
+  //   skipped_disabled — SEARCH_RERANKER_ENABLED=0 or no OpenAI key
+  //   skipped_singleton— ≤1 candidate after fusion, nothing to reorder
+  //   skipped_margin   — top-1 vs top-2 fused-score gap exceeded
+  //                      SEARCH_RERANK_SKIP_MARGIN; the leader is
+  //                      strong enough that the LLM call is unlikely
+  //                      to change the top-K. Tracks the cost saving.
+  readonly searchRerankCount = new Counter({
+    name: 'brain_search_rerank_total',
+    help: 'Search reranker invocations by outcome',
+    labelNames: ['outcome'] as const,
     registers: [this.registry],
   });
 
@@ -106,6 +122,16 @@ export class MetricsService implements OnModuleInit {
 
   observeSearchDuration(seconds: number): void {
     this.searchDuration.observe(seconds);
+  }
+
+  countRerank(
+    outcome:
+      | 'invoked'
+      | 'skipped_disabled'
+      | 'skipped_singleton'
+      | 'skipped_margin',
+  ): void {
+    this.searchRerankCount.inc({ outcome } as LabelValues<'outcome'>);
   }
 
   countRetract(): void {

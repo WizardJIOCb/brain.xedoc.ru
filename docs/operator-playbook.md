@@ -84,6 +84,7 @@ For a whole-tenant forget, hit `dropCompanyDatabase` directly (admin tooling, no
 - `brain_ingest_facts_total{outcome}` — INSERTED / SUPERSEDED / COMPETING / REJECTED
 - `brain_ingest_mentions_total{result}` — extracted / skipped / failed
 - `brain_search_duration_seconds` — histogram, p50/p99 alarms recommended
+- `brain_search_rerank_total{outcome}` — invoked / skipped_disabled / skipped_singleton / skipped_margin. The `skipped_margin` line tracks how often the LLM rerank was bypassed because the post-fusion top-1 vs top-2 gap was already wide; ratio against `invoked` is the cost-saving you got from `SEARCH_RERANK_SKIP_MARGIN`.
 - `brain_retract_total`, `brain_forget_total` — usage counters
 - `brain_compaction_facts_total` — sums across tenants
 - `brain_process_*`, `brain_nodejs_*` — node defaults (heap, event-loop lag)
@@ -93,6 +94,19 @@ The endpoint is **unauthenticated by design** — firewall it off the public sur
 Logs come in two formats. Default in dev: human single-line. Default in prod (`NODE_ENV=production`) or when `LOG_FORMAT=json`: one JSON object per line, ready for Loki/CloudWatch/Datadog.
 
 Each request line carries `companyId` and a short `keyTag` (first 8 chars of `keyHash` after the `sha256:` prefix). Use `keyTag` to attribute traffic to a specific issued key without recovering the secret.
+
+## Tune `SEARCH_RERANK_SKIP_MARGIN`
+
+A relative-margin gate that bypasses the LLM reranker when the fused top-1 has a clear lead over top-2. Default `0` (off). Recommended starting value `0.5` once you have 1-2 weeks of `brain_search_rerank_total{outcome}` data.
+
+Procedure:
+
+1. Leave at `0` for 7 days, gather `invoked` baseline.
+2. Set `SEARCH_RERANK_SKIP_MARGIN=0.5`. The metric series will split into `invoked` and `skipped_margin`. Aim for `skipped_margin / (invoked + skipped_margin)` ≈ 0.3–0.5; that's where the cost saving usually lives without losing recall.
+3. Spot-check by running `pnpm test:eval` against a tenant snapshot, comparing the with-margin vs no-margin recall@1 / MRR. If recall drops more than 1pp, lower the threshold.
+4. Bump down to `0.3` for stricter saving, up to `0.7` if recall regressed; never go above `0.9` (you'd skip almost every query, defeating the reranker's purpose).
+
+The reranker stays the canonical quality lever — this knob just trades a small precision risk for a large cost reduction on queries that didn't need it anyway.
 
 ## Run compaction off-cycle
 

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Surreal, StringRecordId } from 'surrealdb';
 import { SurrealService } from '../db/surreal.service';
 import { EmbedderService } from '../ai/embedder.service';
@@ -7,6 +7,7 @@ import { PredicateRouterService } from '../ai/predicate-router.service';
 import { SearchDto, SearchMode } from './dto/search.dto';
 import { policyFor } from '../ingest/conflict-resolver';
 import { countJsonTokens } from '../common/token-counter';
+import { MetricsService } from '../metrics/metrics.service';
 
 export interface SearchHit {
   entityId: string;
@@ -103,7 +104,38 @@ export class SearchService {
     private readonly embedder: EmbedderService,
     private readonly reranker: RerankerService,
     private readonly predicateRouter: PredicateRouterService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {}
+
+  /**
+   * Decide whether the LLM reranker can be skipped based on the
+   * fused-score margin between the current top-1 and top-2 entities.
+   *
+   * Relative margin: `(top1 − top2) / top1 ≥ marginThreshold`. We use
+   * the relative form because `rankScore` is post-degree-boost and not
+   * normalised to [0, 1] — an absolute threshold would behave wildly
+   * differently across queries with sparse vs dense candidate sets.
+   *
+   * Returns false when:
+   *   - threshold ≤ 0 (feature disabled)
+   *   - candidate set ≤ 1 (no rerank target anyway)
+   *   - top1 score is non-positive (degenerate / empty result)
+   *   - the gap is below threshold (LLM call still earns its keep)
+   *
+   * Pure function exported for unit testing — keeps the inline call
+   * site in `search()` minimal.
+   */
+  static shouldSkipRerankByMargin(
+    candidates: Array<{ rankScore: number }>,
+    marginThreshold: number,
+  ): boolean {
+    if (marginThreshold <= 0) return false;
+    if (candidates.length < 2) return false;
+    const top = candidates[0].rankScore;
+    if (top <= 0) return false;
+    const gap = (top - candidates[1].rankScore) / top;
+    return gap >= marginThreshold;
+  }
 
   async search(
     companyId: string,
@@ -283,7 +315,33 @@ export class SearchService {
         .slice(0, RERANK_WINDOW);
 
       let topEntities = candidatesForRerank;
-      if (this.reranker.isEnabled() && candidatesForRerank.length > 1) {
+      // Margin-based reranker skip. Relative threshold over the
+      // post-degree-boost rankScore: when the leader's gap to #2 is
+      // already wide, the LLM call rarely flips the top-K — skipping
+      // saves an LLM round-trip per query and a chunk of OpenAI
+      // budget. Default 0 (off); operators tune via env after
+      // measuring rerank-flip rate on their workload.
+      const rerankSkipMargin = parseFloat(
+        process.env.SEARCH_RERANK_SKIP_MARGIN ?? '0',
+      );
+      const skipByMargin = SearchService.shouldSkipRerankByMargin(
+        candidatesForRerank,
+        rerankSkipMargin,
+      );
+
+      if (!this.reranker.isEnabled()) {
+        this.metrics?.countRerank('skipped_disabled');
+      } else if (candidatesForRerank.length <= 1) {
+        this.metrics?.countRerank('skipped_singleton');
+      } else if (skipByMargin) {
+        this.metrics?.countRerank('skipped_margin');
+      }
+
+      if (
+        this.reranker.isEnabled() &&
+        candidatesForRerank.length > 1 &&
+        !skipByMargin
+      ) {
         // SubgraphRAG-style 1-hop neighbourhood injection. Fetch
         // each rerank candidate's outgoing + incoming edges in a
         // single batched query, then surface them as
@@ -342,6 +400,7 @@ export class SearchService {
           hints,
         );
         topEntities = permutation.map((i) => candidatesForRerank[i]);
+        this.metrics?.countRerank('invoked');
       }
       topEntities = topEntities.slice(0, limit);
 
