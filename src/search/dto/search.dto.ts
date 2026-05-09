@@ -25,6 +25,18 @@ export class SearchDto {
   @IsOptional() @IsArray() @IsString({ each: true })
   predicates?: string[];
 
+  /**
+   * Restrict search to facts owned by these entity ids. Primary use
+   * case is multi-hop chaining: hop N anchors on entityIds emitted by
+   * hop N-1 so the second sub-query is scoped to candidates already
+   * known to satisfy the first. Either short ids (`cuid_abc`) or
+   * fully-qualified (`knowledge_entity:cuid_abc`) form is accepted —
+   * the search service normalises both into the SurrealDB record
+   * link form before the WHERE clause.
+   */
+  @IsOptional() @IsArray() @IsString({ each: true })
+  entityIds?: string[];
+
   @IsOptional() @IsISO8601()
   asOf?: string;
 

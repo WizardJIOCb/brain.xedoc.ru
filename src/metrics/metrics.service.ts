@@ -20,6 +20,7 @@ import {
  *   - search_rerank_total{outcome}            — invoked|skipped_disabled|skipped_singleton|skipped_margin
  *   - search_cross_encoder_total{outcome}     — invoked|error|skipped_disabled|skipped_singleton
  *   - synthesize_total{outcome}               — ok|no_results|no_grounded_evidence|verifier_partial|verifier_failed|generator_error|verifier_error
+ *   - multi_hop_total{outcome}                — ok|single_hop|chain_empty|no_results|planner_error|hop_error
  *   - retract_total / forget_total            — counters
  *   - compaction_facts_total                  — counter, summed across tenants
  *   - openai_tokens_total{kind, type}         — embed|chat × prompt|completion
@@ -65,6 +66,24 @@ export class MetricsService implements OnModuleInit {
   readonly searchRerankCount = new Counter({
     name: 'brain_search_rerank_total',
     help: 'Search reranker invocations by outcome',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
+
+  // Multi-hop outcomes:
+  //   ok             — chain ran end-to-end with a non-empty final set
+  //   single_hop     — planner reported isMultiHop=false; one hop only
+  //   chain_empty    — combination produced an empty running set; the
+  //                    chain terminated early (saved later hops' cost)
+  //   no_results     — first hop returned zero hits
+  //   planner_error  — planner LLM failed; fell back to single-shot
+  //   hop_error      — a hop's search threw; chain stopped, partial
+  //                    response returned with what we had
+  // The (planner_error + hop_error) ratio tracks the chain's
+  // reliability against the upstream OpenAI / Surreal health.
+  readonly multiHopCount = new Counter({
+    name: 'brain_multi_hop_total',
+    help: 'Multi-hop search invocations by outcome',
     labelNames: ['outcome'] as const,
     registers: [this.registry],
   });
@@ -175,6 +194,18 @@ export class MetricsService implements OnModuleInit {
       | 'skipped_singleton',
   ): void {
     this.searchCrossEncoderCount.inc({ outcome } as LabelValues<'outcome'>);
+  }
+
+  countMultiHop(
+    outcome:
+      | 'ok'
+      | 'single_hop'
+      | 'chain_empty'
+      | 'no_results'
+      | 'planner_error'
+      | 'hop_error',
+  ): void {
+    this.multiHopCount.inc({ outcome } as LabelValues<'outcome'>);
   }
 
   countSynthesize(

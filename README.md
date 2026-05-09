@@ -27,6 +27,7 @@ Layer 1 — Identity (auth)
 | `POST /v1/ingest/fact` | ✅ |
 | `POST /v1/search` | ✅ |
 | `POST /v1/synthesize` | ✅ (corrective-RAG, opt-in via `OPENAI_API_KEY`) |
+| `POST /v1/search/multi-hop` | ✅ (chained search via planner-LLM) |
 | `POST /v1/ingest/mention` | planned 0.2.0 |
 | `POST /v1/ingest/link` | planned 0.2.0 |
 | `GET /v1/entities/:id` | planned 0.2.0 |
@@ -90,6 +91,34 @@ curl -X POST http://localhost:3000/v1/search \
   -H "Content-Type: application/json" \
   -d '{ "query": "maintenance issues", "limit": 5 }'
 ```
+
+## Multi-hop search
+
+`POST /v1/search/multi-hop` runs a CHAINED search: a planner LLM decomposes the free-text query into ≤ `maxHops` sub-queries with combination semantics, then the executor runs them in sequence — each later hop optionally anchored to the running entity set so the search engine never wastes work on candidates already disqualified upstream.
+
+Combination modes (planner-emitted, per hop):
+
+- **seed** — first hop, no prior set
+- **subset_of_previous** — search is anchored via `entityIds` to the running set; result is a strict subset. Most chained reasoning ("FROM the previous result, KEEP those that ALSO …") uses this.
+- **intersect** — hop runs unconstrained; intersect with running set after the fact (preserves recall when the prior set is small)
+- **union** — hop runs unconstrained; union with running set (rare; included for completeness)
+
+When the planner reports `isMultiHop=false`, the executor falls back to a single-shot search — same shape as `POST /v1/search` but with the planner's potentially refined `subQuery` / predicate / asOf.
+
+Set `synthesize: true` to feed the final entity set into `/v1/synthesize` and get a grounded answer alongside the per-hop trace.
+
+```bash
+curl -X POST http://localhost:3000/v1/search/multi-hop \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "tenants who complained in April and upgraded to platinum after",
+    "maxHops": 3,
+    "synthesize": true
+  }'
+```
+
+Response carries `hops[]` (per-hop sub-query + entity-id list) so callers can audit how the planner decomposed their question.
 
 ## Synthesize (corrective-RAG)
 
@@ -172,6 +201,8 @@ Each company gets its own SurrealDB database (`co_<companyId>`). Cross-tenant qu
 | `OPENAI_EMBEDDING_DIMENSIONS` | `1536` | Must match the schema's HNSW dim if HNSW is later enabled. |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Used by `ingest-mention` extraction. |
 | `CONFLICT_*` | per spec | Override the resolution weights at runtime; defaults match `core/capabilities/knowledge.yaml`. |
+| `MULTI_HOP_PLANNER_MODEL` | `OPENAI_CHAT_MODEL` | Override the chat model for the multi-hop planner LLM call. |
+| `MULTI_HOP_PLANNER_CONCURRENCY` | `4` | Max in-flight planner calls. |
 | `SYNTHESIZE_MODEL` | `OPENAI_CHAT_MODEL` | Override the chat model for `/v1/synthesize` generator + verifier calls. |
 | `SYNTHESIZE_DEFAULT_GUARDRAILS` | `strict` | `strict` / `lenient` / `off`. Caller can override per-request via `synthesisGuardrails`. |
 | `SYNTHESIZE_CONCURRENCY` | `4` | Max in-flight LLM calls across synthesize requests. Each request makes 2 calls (generator + verifier in strict/lenient). |

@@ -1,0 +1,21 @@
+import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import { ApiKeyGuard, RequireScopes } from '../auth/api-key.guard';
+import { MultiHopService } from './multi-hop.service';
+import { MultiHopDto } from './dto/multi-hop.dto';
+import { AuthenticatedRequest } from '../auth/api-key.types';
+
+@Controller('v1/search/multi-hop')
+@UseGuards(ApiKeyGuard)
+export class MultiHopController {
+  constructor(private readonly multiHop: MultiHopService) {}
+
+  @Post()
+  @RequireScopes('brain:read')
+  async run(@Req() req: AuthenticatedRequest, @Body() body: MultiHopDto) {
+    return this.multiHop.run(
+      req.brainAuth.companyId,
+      body,
+      req.brainAuth.scopes,
+    );
+  }
+}

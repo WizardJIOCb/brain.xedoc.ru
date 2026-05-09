@@ -11,6 +11,7 @@ import { AiModule } from './ai/ai.module';
 import { IngestModule } from './ingest/ingest.module';
 import { SearchModule } from './search/search.module';
 import { SynthesizeModule } from './synthesize/synthesize.module';
+import { MultiHopModule } from './multi-hop/multi-hop.module';
 import { FactsModule } from './facts/facts.module';
 import { EntitiesModule } from './entities/entities.module';
 import { ArtifactsModule } from './artifacts/artifacts.module';
@@ -42,6 +43,7 @@ import { MetricsModule } from './metrics/metrics.module';
     IngestModule,
     SearchModule,
     SynthesizeModule,
+    MultiHopModule,
     FactsModule,
     EntitiesModule,
     ArtifactsModule,

@@ -1071,6 +1071,18 @@ export class SearchService {
       clauses.push(`AND predicate INSIDE $predicates`);
       params.predicates = dto.predicates;
     }
+    if (dto.entityIds && dto.entityIds.length > 0) {
+      // Multi-hop anchoring. Accept both short and fully-qualified
+      // ids; SurrealDB record-link parsing tolerates both via the
+      // `type::thing` cast at query time.
+      clauses.push(`AND entityId INSIDE $entityIds`);
+      params.entityIds = dto.entityIds.map((raw) => {
+        const id = raw.startsWith('knowledge_entity:')
+          ? raw.slice('knowledge_entity:'.length)
+          : raw;
+        return new StringRecordId(`knowledge_entity:${id}`);
+      });
+    }
     if (asOf) {
       // Search asOf = "what was factually true at that date".
       // Filter on the validity axis (validFrom/validUntil) only;
