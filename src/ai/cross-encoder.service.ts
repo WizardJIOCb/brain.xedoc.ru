@@ -1,0 +1,165 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Semaphore } from '../common/semaphore';
+
+/**
+ * Cross-encoder reranker via Cohere Rerank v3.5.
+ *
+ * Sits BETWEEN convex-fusion and the LLM listwise reranker. The
+ * fusion stage produces a wide candidate window (default 50) sorted
+ * by hybrid score; the cross-encoder reorders that window with a
+ * proper joint-encoder model (query × document attention, not pooled
+ * embeddings) and yields a tighter top-K (default 20) which the LLM
+ * reranker — if enabled — refines further.
+ *
+ * Why a cross-encoder before the LLM:
+ *   1. The cross-encoder gives token-overlap fuzziness that pooled
+ *      embeddings miss without paying an LLM round-trip.
+ *   2. It pre-prunes the LLM's input window, so the LLM sees a
+ *      higher-precision candidate set and the rerank prompt stays
+ *      small (latency / cost).
+ *   3. Combined with SEARCH_RERANK_SKIP_MARGIN, many queries end up
+ *      not needing the LLM at all — cross-encoder lift was enough.
+ *
+ * API: Cohere Rerank v2 endpoint, REST. Direct fetch — Cohere's
+ * official SDK pulls axios + transitive deps; one POST and a JSON
+ * response don't earn that bundle. AbortController governs timeout
+ * (default 5s); the `OPENAI_TIMEOUT_MS` env shape is reused for
+ * symmetry but we're talking to Cohere here.
+ *
+ * Failure mode: any non-2xx, network error, timeout, or malformed
+ * response returns the identity permutation. Retrieval never breaks
+ * because the optional cross-encoder hiccupped — same contract as
+ * the LLM reranker.
+ */
+export interface CrossEncoderCandidate {
+  /** Compact label for the candidate (e.g. canonical name + type). */
+  label: string;
+  /** Body — best 2-3 facts per candidate, kept short. */
+  body: string;
+}
+
+@Injectable()
+export class CrossEncoderService {
+  private readonly logger = new Logger(CrossEncoderService.name);
+  private readonly enabled: boolean;
+  private readonly apiKey: string | undefined;
+  private readonly model: string;
+  private readonly endpoint: string;
+  private readonly timeoutMs: number;
+  private readonly limiter: Semaphore;
+
+  constructor(private readonly configService: ConfigService) {
+    this.enabled =
+      this.configService.get<string>('SEARCH_CROSS_ENCODER_ENABLED', '0') ===
+      '1';
+    this.apiKey = this.configService.get<string>('COHERE_API_KEY');
+    this.model = this.configService.get<string>(
+      'SEARCH_CROSS_ENCODER_MODEL',
+      'rerank-v3.5',
+    );
+    this.endpoint = this.configService.get<string>(
+      'SEARCH_CROSS_ENCODER_ENDPOINT',
+      'https://api.cohere.com/v2/rerank',
+    );
+    this.timeoutMs = parseInt(
+      this.configService.get<string>('SEARCH_CROSS_ENCODER_TIMEOUT_MS', '5000'),
+      10,
+    );
+    this.limiter = new Semaphore(
+      parseInt(
+        this.configService.get<string>('SEARCH_CROSS_ENCODER_CONCURRENCY', '4'),
+        10,
+      ),
+    );
+  }
+
+  isEnabled(): boolean {
+    return this.enabled && !!this.apiKey;
+  }
+
+  /**
+   * Re-rank `candidates` against `query`. Returns a permutation of
+   * `[0..candidates.length)` in descending-relevance order. Identity
+   * fallback on any failure — caller does not need to catch.
+   */
+  async rerank(
+    query: string,
+    candidates: CrossEncoderCandidate[],
+  ): Promise<number[]> {
+    const identity = candidates.map((_, i) => i);
+    if (!this.isEnabled() || candidates.length <= 1 || !query.trim()) {
+      return identity;
+    }
+
+    const documents = candidates.map((c) =>
+      c.body ? `${c.label}\n${c.body}` : c.label,
+    );
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), this.timeoutMs).unref();
+
+    try {
+      return await this.limiter.run(async () => {
+        const res = await fetch(this.endpoint, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: this.model,
+            query,
+            documents,
+            top_n: documents.length,
+          }),
+          signal: ac.signal,
+        });
+        if (!res.ok) {
+          this.logger.warn(
+            `Cross-encoder HTTP ${res.status} — falling back to identity`,
+          );
+          return identity;
+        }
+        const json = (await res.json()) as {
+          results?: Array<{ index: number; relevance_score: number }>;
+        };
+        const results = json?.results;
+        if (!Array.isArray(results) || results.length === 0) {
+          return identity;
+        }
+        // Validate it's a permutation of [0..N). Cohere returns
+        // exactly that, but defensive parsing keeps a malformed
+        // response from poisoning the candidate set.
+        const seen = new Set<number>();
+        const out: number[] = [];
+        for (const r of results) {
+          if (typeof r?.index !== 'number' || !Number.isInteger(r.index)) {
+            return identity;
+          }
+          if (r.index < 0 || r.index >= candidates.length) return identity;
+          if (seen.has(r.index)) return identity;
+          seen.add(r.index);
+          out.push(r.index);
+        }
+        // Cohere returns ranked subset when fewer than top_n — fill
+        // any missing indices in original order at the tail so the
+        // result is always a full permutation.
+        if (out.length < candidates.length) {
+          for (let i = 0; i < candidates.length; i++) {
+            if (!seen.has(i)) out.push(i);
+          }
+        }
+        return out;
+      });
+    } catch (err) {
+      const e = err as Error;
+      this.logger.warn(
+        `Cross-encoder ${e.name === 'AbortError' ? 'timed out' : 'failed'}: ${e.message}`,
+      );
+      return identity;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}

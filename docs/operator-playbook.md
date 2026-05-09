@@ -85,6 +85,7 @@ For a whole-tenant forget, hit `dropCompanyDatabase` directly (admin tooling, no
 - `brain_ingest_mentions_total{result}` — extracted / skipped / failed
 - `brain_search_duration_seconds` — histogram, p50/p99 alarms recommended
 - `brain_search_rerank_total{outcome}` — invoked / skipped_disabled / skipped_singleton / skipped_margin. The `skipped_margin` line tracks how often the LLM rerank was bypassed because the post-fusion top-1 vs top-2 gap was already wide; ratio against `invoked` is the cost-saving you got from `SEARCH_RERANK_SKIP_MARGIN`.
+- `brain_search_cross_encoder_total{outcome}` — invoked / error / skipped_disabled / skipped_singleton. `error` rate above ~1% means Cohere is timing out or 4xx-ing — bump `SEARCH_CROSS_ENCODER_TIMEOUT_MS`, check the Cohere status page, or rotate `COHERE_API_KEY`.
 - `brain_retract_total`, `brain_forget_total` — usage counters
 - `brain_compaction_facts_total` — sums across tenants
 - `brain_process_*`, `brain_nodejs_*` — node defaults (heap, event-loop lag)

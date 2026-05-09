@@ -18,6 +18,7 @@ import {
  *   - ingest_mentions_total{result}           — extracted|skipped|failed
  *   - search_duration_seconds                 — histogram, buckets tuned for ~ms-to-1s
  *   - search_rerank_total{outcome}            — invoked|skipped_disabled|skipped_singleton|skipped_margin
+ *   - search_cross_encoder_total{outcome}     — invoked|error|skipped_disabled|skipped_singleton
  *   - retract_total / forget_total            — counters
  *   - compaction_facts_total                  — counter, summed across tenants
  *   - openai_tokens_total{kind, type}         — embed|chat × prompt|completion
@@ -63,6 +64,20 @@ export class MetricsService implements OnModuleInit {
   readonly searchRerankCount = new Counter({
     name: 'brain_search_rerank_total',
     help: 'Search reranker invocations by outcome',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
+
+  // Cross-encoder outcomes:
+  //   invoked          — Cohere call returned a non-identity permutation
+  //   error            — Cohere fallback to identity (timeout / 4xx / 5xx)
+  //   skipped_disabled — SEARCH_CROSS_ENCODER_ENABLED=0 or no Cohere key
+  //   skipped_singleton— ≤1 candidate, nothing to reorder
+  // The error vs invoked split is what tells the operator whether the
+  // cross-encoder is actually doing work or silently degrading.
+  readonly searchCrossEncoderCount = new Counter({
+    name: 'brain_search_cross_encoder_total',
+    help: 'Cross-encoder invocations by outcome',
     labelNames: ['outcome'] as const,
     registers: [this.registry],
   });
@@ -132,6 +147,16 @@ export class MetricsService implements OnModuleInit {
       | 'skipped_margin',
   ): void {
     this.searchRerankCount.inc({ outcome } as LabelValues<'outcome'>);
+  }
+
+  countCrossEncoder(
+    outcome:
+      | 'invoked'
+      | 'error'
+      | 'skipped_disabled'
+      | 'skipped_singleton',
+  ): void {
+    this.searchCrossEncoderCount.inc({ outcome } as LabelValues<'outcome'>);
   }
 
   countRetract(): void {

@@ -4,6 +4,7 @@ import { ExtractorService } from './extractor.service';
 import { RerankerService } from './reranker.service';
 import { HypeService } from './hype.service';
 import { PredicateRouterService } from './predicate-router.service';
+import { CrossEncoderService } from './cross-encoder.service';
 
 @Global()
 @Module({
@@ -13,6 +14,7 @@ import { PredicateRouterService } from './predicate-router.service';
     RerankerService,
     HypeService,
     PredicateRouterService,
+    CrossEncoderService,
   ],
   exports: [
     EmbedderService,
@@ -20,6 +22,7 @@ import { PredicateRouterService } from './predicate-router.service';
     RerankerService,
     HypeService,
     PredicateRouterService,
+    CrossEncoderService,
   ],
 })
 export class AiModule {}

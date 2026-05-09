@@ -4,6 +4,7 @@ import { SurrealService } from '../db/surreal.service';
 import { EmbedderService } from '../ai/embedder.service';
 import { RerankerService } from '../ai/reranker.service';
 import { PredicateRouterService } from '../ai/predicate-router.service';
+import { CrossEncoderService } from '../ai/cross-encoder.service';
 import { SearchDto, SearchMode } from './dto/search.dto';
 import { policyFor } from '../ingest/conflict-resolver';
 import { countJsonTokens } from '../common/token-counter';
@@ -105,6 +106,7 @@ export class SearchService {
     private readonly embedder: EmbedderService,
     private readonly reranker: RerankerService,
     private readonly predicateRouter: PredicateRouterService,
+    private readonly crossEncoder: CrossEncoderService,
     @Optional() private readonly metrics?: MetricsService,
   ) {}
 
@@ -343,15 +345,70 @@ export class SearchService {
         );
       }
 
-      // Pull a wider rerank window (2× limit) so the LLM-based
-      // reranker can promote a borderline candidate from outside
-      // the would-be top-K. Capped at 20 so the reranker prompt
-      // stays small (latency + cost). When the reranker is
-      // disabled this just means we sort and slice as before.
+      // Two-stage rerank window:
+      //   1. Cross-encoder (Cohere Rerank, optional) reorders a WIDE
+      //      window of fusion-sorted candidates. Joint query×document
+      //      attention catches token-overlap signals pooled embeddings
+      //      miss, and pre-prunes for the LLM stage so the LLM prompt
+      //      stays small.
+      //   2. LLM listwise reranker refines the surviving NARROW window.
+      // When the cross-encoder is disabled we collapse straight to the
+      // narrow window — same shape as before.
       const RERANK_WINDOW = Math.min(limit * 2, 20);
-      const candidatesForRerank = [...byEntity.values()]
+      const CROSS_ENCODER_WINDOW = this.crossEncoder.isEnabled()
+        ? Math.min(
+            parseInt(
+              process.env.SEARCH_CROSS_ENCODER_WINDOW ?? '50',
+              10,
+            ) || 50,
+            byEntity.size,
+          )
+        : RERANK_WINDOW;
+
+      const wideCandidates = [...byEntity.values()]
         .sort((a, b) => b.rankScore - a.rankScore)
-        .slice(0, RERANK_WINDOW);
+        .slice(0, CROSS_ENCODER_WINDOW);
+
+      let candidatesForRerank = wideCandidates.slice(0, RERANK_WINDOW);
+
+      if (this.crossEncoder.isEnabled() && wideCandidates.length > 1) {
+        // Build inputs once — same shape feeds both cross-encoder
+        // and LLM rerank stages. The LLM stage adds neighbours later
+        // (per-candidate fetch happens inside its branch); the
+        // cross-encoder runs on the lighter "label + top-3 facts"
+        // body for speed and cost.
+        const xInputs = wideCandidates.map((e) => {
+          const ent = e.facts[0]?.row.entity ?? {
+            type: 'other',
+            canonicalName: e.entityId,
+          };
+          const topFacts = [...e.facts]
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 3)
+            .map((sf) => `- ${sf.row.predicate}: ${sf.row.object}`)
+            .join('\n');
+          return {
+            label: `${ent.canonicalName} [${ent.type}]`,
+            body: topFacts,
+          };
+        });
+        const xPerm = await withSpan(
+          'search.cross_encoder',
+          () => this.crossEncoder.rerank(dto.query, xInputs),
+          { 'cross_encoder.candidates': xInputs.length },
+        );
+        // Detect identity fallback (transport / parse failure) so the
+        // metric distinguishes real lift from no-op error paths.
+        const isIdentity = xPerm.every((idx, i) => idx === i);
+        this.metrics?.countCrossEncoder(isIdentity ? 'error' : 'invoked');
+        candidatesForRerank = xPerm
+          .map((i) => wideCandidates[i])
+          .slice(0, RERANK_WINDOW);
+      } else if (!this.crossEncoder.isEnabled()) {
+        this.metrics?.countCrossEncoder('skipped_disabled');
+      } else {
+        this.metrics?.countCrossEncoder('skipped_singleton');
+      }
 
       let topEntities = candidatesForRerank;
       // Margin-based reranker skip. Relative threshold over the
