@@ -146,13 +146,13 @@ export class DreamsResolverService {
   ): Promise<Array<{ a: CompetingFactRow; b: CompetingFactRow }>> {
     const cutoff = new Date(
       Date.now() - this.minAgeDays * 24 * 60 * 60 * 1000,
-    ).toISOString();
+    );
     const [rows] = await db.query<[CompetingFactRow[]]>(
       `SELECT id, entityId, predicate, object, confidence, validFrom, recordedAt, source
        FROM knowledge_fact
        WHERE status = 'competing'
          AND retractedAt IS NONE
-         AND recordedAt < d$cutoff
+         AND recordedAt <= $cutoff
        ORDER BY entityId, predicate, recordedAt ASC`,
       { cutoff },
     );

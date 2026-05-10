@@ -23,6 +23,7 @@
     "test:eval:directory": "pnpm build && DIRECTORY_RUN=1 jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=directory",
     "test:eval:json": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=json-directory",
     "directory:fetch:wikidata": "ts-node -r tsconfig-paths/register scripts/fetch-wikidata-directory.ts",
+    "test:eval:dreams": "pnpm build && DREAMS_E2E_RUN=1 jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=dreams.real",
     "schema:apply": "ts-node -r tsconfig-paths/register scripts/apply-schema.ts"
   },
   "dependencies": {

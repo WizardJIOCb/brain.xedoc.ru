@@ -22,6 +22,13 @@ export interface SpawnOptions {
   scopes?: string[];
   /** Additional keys with their own scopes — issued for the same tenant. */
   extraKeyScopes?: string[][];
+  /**
+   * Extra env vars merged on top of the defaults — opt-in flags
+   * for retrieval features (SEARCH_RERANKER_ENABLED, SEARCH_HYPE_ENABLED,
+   * DREAMS_*_ENABLED, etc.) so individual specs can exercise paths
+   * that are off by default in the standard quality eval.
+   */
+  env?: Record<string, string>;
 }
 
 const DEFAULT_SCOPES = [
@@ -60,6 +67,9 @@ export async function spawnService(opts: SpawnOptions = {}): Promise<SpawnedServ
     OPENAI_CHAT_MODEL: 'gpt-4o-mini',
     BRAIN_API_KEYS: JSON.stringify(allKeys),
     FORGET_HMAC_KEY: 'test-hmac-key-must-be-at-least-32-chars',
+    // Spec-supplied overrides land last so a spec can override anything
+    // (including the model — useful for opus-only correctness checks).
+    ...(opts.env ?? {}),
   };
 
   const manager = new ProcessManager();

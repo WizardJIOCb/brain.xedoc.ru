@@ -294,7 +294,7 @@ Output strictly the JSON shape requested. No preamble.`;
   private async fetchTopFacts(db: Surreal, entityId: string): Promise<string> {
     type R = { predicate: string; object: string };
     const [rows] = await db.query<[R[]]>(
-      `SELECT predicate, object FROM knowledge_fact
+      `SELECT predicate, object, confidence FROM knowledge_fact
        WHERE entityId = $eid
          AND status = 'active'
          AND retractedAt IS NONE
