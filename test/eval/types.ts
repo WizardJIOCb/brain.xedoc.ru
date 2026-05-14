@@ -137,6 +137,69 @@ export interface QueryExpectation {
   mustNotLeakPredicate?: string;
 }
 
+// ── Synthesize (corrective-RAG) faithfulness expectations ─────────────
+//
+// Each synthesizeQuery runs /v1/synthesize against the configured
+// scenarios and pipes the (answer, citations) tuple through the
+// RAGAS-style claim-decomposed verifier (test/eval/metrics/faithfulness.ts).
+// Aggregated as `faithfulness:mean` and `faithfulness:verifier-failures`.
+
+export interface SynthesizeExpectation {
+  /** Free-text query handed to /v1/synthesize. */
+  query: string;
+  /**
+   * Soft floor: faithfulness score must clear this threshold for the
+   * scenario to count as a pass. Default 0.85 (RAGAS production
+   * convention — keeps paraphrase noise out without blocking on
+   * minor wording).
+   */
+  faithfulnessFloor?: number;
+  /**
+   * If true, an empty/null answer (synthesizer rejected for lack of
+   * grounded evidence) is treated as a pass — used when the test
+   * setup is intentionally thin and we want to validate the
+   * guardrail engaged rather than the answer quality. Default false.
+   */
+  allowEmptyAnswer?: boolean;
+  /**
+   * Optional asOf for bitemporal synthesize.
+   */
+  asOf?: string;
+  /**
+   * Optional caller scopes — same semantics as QueryExpectation.callerScopes.
+   * The runner does NOT switch clients on this for synthesize; the field
+   * is reserved for future use.
+   */
+  callerScopes?: Array<'brain:read' | 'brain:write' | 'brain:read_pii' | 'brain:admin'>;
+}
+
+export interface SynthesizeOutcome {
+  scenarioId: string;
+  query: string;
+  /** null when synthesizer rejected (no grounded evidence). */
+  answer: string | null;
+  /**
+   * The reason the synthesizer surfaced — relevant when answer is null.
+   * Mirrors brain's SynthesisReason without coupling the harness to
+   * the SDK enum.
+   */
+  reason?: string;
+  /** RAGAS faithfulness score for the answer; null when no answer. */
+  faithfulness: number | null;
+  /** N atomic claims the verifier evaluated. */
+  totalClaims: number;
+  /**
+   * Set when the verifier returned a malformed response. Surfaced as
+   * a separate metric so a half-broken LLM call doesn't masquerade
+   * as low faithfulness.
+   */
+  verifierFailureKind?: 'length_mismatch' | 'invalid_verdicts' | 'exception';
+  /** Pass = answer present (or allowEmptyAnswer) AND faithfulness ≥ floor AND no verifier failure. */
+  passed: boolean;
+  /** Floor that was applied — surfaced for the report. */
+  faithfulnessFloor: number;
+}
+
 // ── Memory-lifecycle assertions ───────────────────────────────────────
 // Run AFTER setup, BEFORE queries. They check that brain's read-side
 // reflects the lifecycle operations (update, retract, forget) declared
@@ -218,6 +281,13 @@ export interface Scenario {
    * into the `privacy-leakage-mia-auc` metric.
    */
   miaTests?: MiaTest[];
+  /**
+   * Optional synthesize queries — run AFTER queries. Each one fires
+   * /v1/synthesize and pipes (answer, citations) through the
+   * RAGAS-style faithfulness verifier. Aggregated as
+   * `faithfulness:mean` and `faithfulness:verifier-failures`.
+   */
+  synthesizeQueries?: SynthesizeExpectation[];
 }
 
 // ── Metric outputs (per scenario / aggregate) ─────────────────────────
@@ -319,6 +389,15 @@ export interface MiaTestResult {
   passed: boolean;
   forgottenN: number;
   controlN: number;
+  /**
+   * True when forgottenN+controlN < MIA_MIN_N (default 30). The
+   * Mann-Whitney AUC on tiny N is statistically indistinguishable
+   * from 0.5 noise — gating on it produces false positives. When set,
+   * the harness still computes AUC for visibility but flips `passed`
+   * to true regardless of threshold and surfaces an underpowered
+   * note. This matches the audit recommendation in the eval roadmap.
+   */
+  underpowered?: boolean;
   detail?: string;
 }
 
@@ -330,6 +409,7 @@ export interface ScenarioOutcome {
   identityMergeResult?: IdentityMergeResult;
   memoryAssertionResults: MemoryAssertionResult[];
   miaTestResults: MiaTestResult[];
+  synthesizeOutcomes: SynthesizeOutcome[];
 }
 
 export interface AggregateMetric {

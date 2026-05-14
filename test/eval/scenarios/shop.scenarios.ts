@@ -69,5 +69,17 @@ export const shopScenarios: Scenario[] = [
         expectedTopEntityRef: 'shop.maya',
       },
     ],
+    // Synthesize / faithfulness smoke. Maya has 4 facts including a
+    // return + a replacement order — a synthesized "what's going on
+    // with Maya?" answer should ground in the interacted_with facts
+    // without inventing details. Floor 0.85 = RAGAS production
+    // convention; lenient guardrails so we score the answer rather
+    // than punt to "no grounded evidence".
+    synthesizeQueries: [
+      {
+        query: 'what happened with Maya Tanaka recent orders',
+        faithfulnessFloor: 0.85,
+      },
+    ],
   },
 ];

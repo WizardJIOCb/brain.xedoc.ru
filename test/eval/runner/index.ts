@@ -6,3 +6,4 @@ export { Reporter } from './reporter';
 export { EvalRunner } from './eval-runner';
 export { MemoryAssertionsChecker } from './memory-assertions';
 export { MiaChecker } from './mia-checker';
+export { FaithfulnessChecker } from './faithfulness-checker';

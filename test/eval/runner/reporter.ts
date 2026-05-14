@@ -143,11 +143,37 @@ export class Reporter {
     const miaTests = report.outcomes.flatMap((o) => o.miaTestResults);
     if (miaTests.length > 0) {
       lines.push('', '### Privacy leakage (MIA AUC)', '');
-      lines.push('| scenario | description | AUC | threshold | pass |');
-      lines.push('|---|---|---|---|---|');
+      lines.push('| scenario | description | N | AUC | threshold | pass |');
+      lines.push('|---|---|---|---|---|---|');
       for (const m of miaTests) {
+        const status = m.underpowered
+          ? `⚠ underpowered`
+          : m.passed
+            ? '✓'
+            : '✗';
+        const totalN = m.forgottenN + m.controlN;
         lines.push(
-          `| ${m.scenarioId} | ${this.shorten(m.description)} | ${m.auc.toFixed(3)} | ${m.threshold.toFixed(2)} | ${m.passed ? '✓' : '✗'} |`,
+          `| ${m.scenarioId} | ${this.shorten(m.description)} | ${totalN} | ${m.auc.toFixed(3)} | ${m.threshold.toFixed(2)} | ${status} |`,
+        );
+      }
+    }
+
+    // Faithfulness — surface every synthesize outcome (pass + fail).
+    // The mean / pass-rate live in the per-vertical metric block;
+    // this table is the per-query forensic view (which answer scored
+    // what, did the verifier choke).
+    const synthOutcomes = report.outcomes.flatMap((o) => o.synthesizeOutcomes);
+    if (synthOutcomes.length > 0) {
+      lines.push('', '### Faithfulness (synthesize)', '');
+      lines.push('| scenario | query | answer? | claims | faithfulness | floor | pass |');
+      lines.push('|---|---|---|---|---|---|---|');
+      for (const s of synthOutcomes) {
+        const ans = s.answer ? '✓' : `null (${s.reason ?? '?'})`;
+        const f = s.faithfulness === null ? '—' : s.faithfulness.toFixed(2);
+        const verifier = s.verifierFailureKind ? ` ⚠${s.verifierFailureKind}` : '';
+        const status = s.passed ? `✓${verifier}` : `✗${verifier}`;
+        lines.push(
+          `| ${s.scenarioId} | ${this.shorten(s.query)} | ${ans} | ${s.totalClaims} | ${f} | ${s.faithfulnessFloor.toFixed(2)} | ${status} |`,
         );
       }
     }

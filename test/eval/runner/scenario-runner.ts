@@ -3,6 +3,7 @@ import { SetupApplier } from './setup-applier';
 import { QueryExecutor } from './query-executor';
 import { MemoryAssertionsChecker } from './memory-assertions';
 import { MiaChecker } from './mia-checker';
+import { FaithfulnessChecker } from './faithfulness-checker';
 
 /**
  * Runs ONE scenario end-to-end:
@@ -25,6 +26,7 @@ export class ScenarioRunner {
     private readonly queryExecutor: QueryExecutor,
     private readonly memoryChecker?: MemoryAssertionsChecker,
     private readonly miaChecker?: MiaChecker,
+    private readonly faithfulnessChecker?: FaithfulnessChecker,
   ) {}
 
   async run(scenario: Scenario): Promise<ScenarioOutcome> {
@@ -43,6 +45,15 @@ export class ScenarioRunner {
       queryResults.push(await this.queryExecutor.execute(q));
     }
 
+    // Synthesize / faithfulness runs LAST: it depends on the same
+    // search retrieval the queryExecutor exercised, but adds the
+    // generator + verifier LLM round-trips on top. Putting it after
+    // queries means a search regression surfaces in queryResults
+    // before the more expensive faithfulness leg burns tokens.
+    const synthesizeOutcomes = this.faithfulnessChecker
+      ? await this.faithfulnessChecker.check(scenario)
+      : [];
+
     return {
       scenarioId: scenario.id,
       vertical: scenario.vertical,
@@ -51,6 +62,7 @@ export class ScenarioRunner {
       identityMergeResult: identityMerge,
       memoryAssertionResults,
       miaTestResults,
+      synthesizeOutcomes,
     };
   }
 }

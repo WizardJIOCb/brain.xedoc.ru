@@ -54,6 +54,21 @@ export class Aggregator {
       .filter((r): r is NonNullable<typeof r> => r !== undefined);
     const memAssertions = group.flatMap((o) => o.memoryAssertionResults);
     const miaResults = group.flatMap((o) => o.miaTestResults);
+    const synthOutcomes = group.flatMap((o) => o.synthesizeOutcomes);
+    const synthScored = synthOutcomes.filter(
+      (o): o is typeof o & { faithfulness: number } => o.faithfulness !== null,
+    );
+    const synthMean =
+      synthScored.length === 0
+        ? null
+        : synthScored.reduce((acc, o) => acc + o.faithfulness, 0) / synthScored.length;
+    const synthVerifierFailures = synthOutcomes.filter(
+      (o) => o.verifierFailureKind !== undefined,
+    ).length;
+    const synthPassRate =
+      synthOutcomes.length === 0
+        ? null
+        : synthOutcomes.filter((o) => o.passed).length / synthOutcomes.length;
 
     // Temporal split: queries carrying an asOf are bitemporal /
     // historical-intent; the rest are current-state. A SOTA-claim
@@ -144,6 +159,29 @@ export class Aggregator {
       // when AUC ≤ 0.6 across every test; we surface the worst
       // value so a regression can't hide behind an average.
       // null when no MIA tests in the slice.
+      // RAGAS faithfulness mean across synthesize outcomes. Threshold
+      // 0.85 mirrors the production convention from the metric
+      // documentation. faithfulness:pass-rate is the gate — mean is
+      // reported alongside for diagnosis. verifier-failures is a
+      // separate count (any non-zero means the LLM verifier returned
+      // a malformed shape and the score is suspect).
+      { name: 'faithfulness:mean', value: synthMean, n: synthScored.length },
+      {
+        name: 'faithfulness:pass-rate',
+        value: synthPassRate,
+        threshold: synthOutcomes.length > 0 ? 0.8 : undefined,
+        n: synthOutcomes.length,
+      },
+      // Pure diagnostic count (no threshold) — gate semantics are
+      // value >= threshold = pass, which inverts wrong for "want
+      // zero failures". The faithfulness:pass-rate already counts
+      // verifier failures as not-passed, so the gate signal is
+      // already covered.
+      {
+        name: 'faithfulness:verifier-failures',
+        value: synthOutcomes.length === 0 ? null : synthVerifierFailures,
+        n: synthOutcomes.length,
+      },
       {
         name: 'privacy-leakage-mia-auc',
         value: maxMiaAuc(miaResults),
