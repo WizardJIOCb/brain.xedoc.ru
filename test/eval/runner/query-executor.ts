@@ -21,6 +21,7 @@ export class QueryExecutor {
       query: expectation.query,
       limit: 10,
       asOf: expectation.asOf,
+      ...(expectation.predicates ? { predicates: expectation.predicates } : {}),
     });
     const [vertical, id] = expectation.expectedTopEntityRef.split('.', 2);
     const refTag = `${vertical}__${id}`;

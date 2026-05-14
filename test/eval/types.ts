@@ -113,6 +113,16 @@ export interface QueryExpectation {
    */
   asOf?: string;
   /**
+   * Optional predicate filter passed straight to search.dto.predicates.
+   * Use when the test wants to isolate one fact dimension from
+   * ranking noise — e.g. a bitemporal-cutoff test that needs to see
+   * the address fact regardless of whether the name fact outranks it
+   * lexically. Without this, search returns matched facts only and a
+   * weak query against a strong name-match can hide the bitemporal
+   * slice the test is meant to check.
+   */
+  predicates?: string[];
+  /**
    * Optional: scopes the simulated caller has. Default: read+pii.
    */
   callerScopes?: Array<'brain:read' | 'brain:write' | 'brain:read_pii' | 'brain:admin'>;
