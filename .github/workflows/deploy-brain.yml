@@ -38,12 +38,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Checkout inite-shared (SDK source for build)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/inite-shared
-          path: ../inite-shared
-          token: ${{ secrets.INITE_SHARED_PAT || github.token }}
+      # @inite/knowledge SDK is a test-only import (TS path mapping in
+      # tsconfig.json points at ../inite-shared/...). Production build
+      # only compiles src/ and ships dist/main.js — no SDK code is
+      # bundled. So we skip the inite-shared checkout: nothing to fetch.
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
