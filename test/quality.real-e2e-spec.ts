@@ -6,9 +6,13 @@
  * from its single-purpose collaborators, runs all scenarios, prints
  * the markdown report, asserts overall thresholds.
  */
+import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { BrainClient } from '@inite/knowledge';
 import { spawnService, SpawnedService } from './spawn';
 import { allScenarios } from './eval/scenarios';
+import { loadDirectoryJson } from './eval/loaders/json-directory.loader';
+import { buildQueryBankFromDirectory } from './eval/loaders/directory-query-bank';
 import {
   SetupApplier,
   QueryExecutor,
@@ -19,6 +23,7 @@ import {
   MemoryAssertionsChecker,
   MiaChecker,
 } from './eval/runner';
+import type { Scenario } from './eval/types';
 
 describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
   let svc: SpawnedService;
@@ -52,9 +57,35 @@ describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
       new Aggregator(),
     );
 
-    const report = await runner.run(allScenarios);
-     
-    console.log('\n' + new Reporter().render(report) + '\n');
+    const directoryScenarios = loadDirectoryScenarios();
+    if (directoryScenarios.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[quality] augmenting with ${directoryScenarios.length} directory scenario(s) ` +
+          `(${directoryScenarios.reduce((n, s) => n + s.queries.length, 0)} queries)`,
+      );
+    }
+    const scenarios: Scenario[] = [...allScenarios, ...directoryScenarios];
+
+    const report = await runner.run(scenarios);
+
+    const reporter = new Reporter();
+    console.log('\n' + reporter.render(report) + '\n');
+
+    // Stable JSON for baseline-diff / artifact upload. Off by default
+    // (env-gated) so local `pnpm test:eval` doesn't litter the repo.
+    const reportOut = process.env.BRAIN_EVAL_REPORT_OUT;
+    if (reportOut) {
+      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const { dirname } = await import('node:path');
+      mkdirSync(dirname(resolve(reportOut)), { recursive: true });
+      writeFileSync(
+        resolve(reportOut),
+        JSON.stringify(reporter.serialize(report), null, 2),
+      );
+      // eslint-disable-next-line no-console
+      console.log(`[quality] wrote machine-readable report to ${reportOut}`);
+    }
 
     // Aggregate-level thresholds are necessary but not sufficient: a
     // vertical with extraction-recall=0.00 can ride below the radar
@@ -84,5 +115,65 @@ describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
     ];
 
     expect({ failed: failures }).toEqual({ failed: [] });
-  }, 600_000);
+  }, 1_200_000);
 });
+
+/**
+ * Pull in directory-shaped fixtures (Wikidata exports, operator JSON
+ * dumps) and synthesize a query bank for each. Default-on for the
+ * cached Wikidata Russian-writers fixture so the gate measures
+ * retrieval against a real reference set, not just the ~40 declarative
+ * scenarios. Skipped silently if the file is absent (e.g., a fresh
+ * clone before `pnpm fetch:wikidata`).
+ *
+ * Env knobs:
+ *   BRAIN_EVAL_DIRECTORY_PATH      — comma-separated paths to override
+ *                                    the default fixture set
+ *   BRAIN_EVAL_DIRECTORY_SAMPLE    — entities to sample per directory
+ *                                    (default 30; cap on bank size and
+ *                                    OpenAI spend per gate)
+ *   BRAIN_EVAL_DIRECTORY_SEED      — sampling seed (default 42)
+ *   BRAIN_EVAL_DIRECTORY_DISABLE=1 — opt out entirely (e.g. local fast
+ *                                    iteration without the Wikidata leg)
+ */
+function loadDirectoryScenarios(): Scenario[] {
+  if (process.env.BRAIN_EVAL_DIRECTORY_DISABLE === '1') return [];
+
+  const explicitPaths = process.env.BRAIN_EVAL_DIRECTORY_PATH
+    ?.split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const defaultPaths = ['test/eval/fixtures/wd-russian-writers.json'];
+  const paths = explicitPaths && explicitPaths.length > 0 ? explicitPaths : defaultPaths;
+
+  const sample = parseInt(process.env.BRAIN_EVAL_DIRECTORY_SAMPLE ?? '30', 10);
+  const seed = parseInt(process.env.BRAIN_EVAL_DIRECTORY_SEED ?? '42', 10);
+
+  const out: Scenario[] = [];
+  for (const rel of paths) {
+    const abs = resolve(rel);
+    if (!existsSync(abs)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[quality] directory fixture not found, skipping: ${abs}`);
+      continue;
+    }
+    const loaded = loadDirectoryJson(abs);
+    // The query-bank generator wants the raw JsonDirectory (entity
+    // facts to pick names/dob/address from) AND the loader's Scenario
+    // (its setup steps are reused as-is). Loader doesn't surface the
+    // raw directory, so we re-parse — cheap for a few-hundred-KB JSON
+    // and keeps the loader API unchanged.
+    const directory = JSON.parse(readFileSync(abs, 'utf8'));
+    const bank = buildQueryBankFromDirectory(directory, loaded.scenario, {
+      sampleEntities: sample,
+      seed,
+    });
+    // eslint-disable-next-line no-console
+    console.log(
+      `[quality] directory '${rel}': ${bank.stats.entitiesSeeded} entities seeded, ` +
+        `${bank.stats.entitiesSampled} sampled, ${bank.stats.queriesGenerated} queries generated`,
+    );
+    out.push(bank.scenario);
+  }
+  return out;
+}
