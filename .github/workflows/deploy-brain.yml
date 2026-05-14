@@ -1,12 +1,26 @@
 name: Deploy brain.inite.ai
 
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'test/**'
+      - '.planning/**'
   workflow_dispatch:
     inputs:
       action:
         description: 'deploy | restart | logs'
         required: false
         default: 'deploy'
+
+# Cancel an in-flight auto-deploy when a new push lands. Manual
+# dispatches keep their own concurrency group so they don't fight
+# auto-deploys.
+concurrency:
+  group: deploy-brain-${{ github.event_name }}
+  cancel-in-progress: true
 
 env:
   PROJECT_NAME: inite-brain-service
@@ -15,7 +29,9 @@ env:
 
 jobs:
   build-and-push:
-    if: github.event.inputs.action != 'restart' && github.event.inputs.action != 'logs'
+    # Skip build for restart/logs ops. Push events have no inputs,
+    # so the inputs.action check defaults to true (build runs).
+    if: github.event_name == 'push' || (github.event.inputs.action != 'restart' && github.event.inputs.action != 'logs')
     runs-on: [self-hosted, sfo]
 
     steps:
@@ -56,7 +72,15 @@ jobs:
 
   deploy:
     needs: build-and-push
-    if: always() && (needs.build-and-push.result == 'success' || github.event.inputs.action == 'restart' || github.event.inputs.action == 'logs')
+    # Run the deploy job when:
+    #   - push event: only after a successful build
+    #   - workflow_dispatch deploy: only after a successful build
+    #   - workflow_dispatch restart/logs: skip build, run anyway
+    if: |
+      always() && (
+        (github.event_name == 'push' && needs.build-and-push.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && (needs.build-and-push.result == 'success' || github.event.inputs.action == 'restart' || github.event.inputs.action == 'logs'))
+      )
     runs-on: [self-hosted, sfo]
 
     steps:

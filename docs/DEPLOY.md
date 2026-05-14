@@ -82,10 +82,17 @@ retries for 2 minutes.
 
 ## Subsequent deploys
 
-`Run workflow → action=deploy` rebuilds and rolls. The container restart
-is **not zero-downtime** — single replica today; brain in-flight requests
-get aborted on swap. Acceptable for current traffic; revisit when caller
-volume warrants.
+**Auto-deploy on push to main.** Every merge into `main` triggers the
+workflow on the sfo runner — build, push, deploy. Concurrency group
+cancels in-flight auto-deploys when a newer push lands so the droplet
+only runs the head commit. Doc-only / test-only / planning-only
+changes skip the deploy via `paths-ignore`.
+
+`Run workflow → action=deploy` does the same thing manually (e.g. to
+deploy from a non-main branch via the dispatch UI). The container
+restart is **not zero-downtime** — single replica today; brain in-flight
+requests get aborted on swap. Acceptable for current traffic; revisit
+when caller volume warrants.
 
 ## Operational dispatch actions
 
