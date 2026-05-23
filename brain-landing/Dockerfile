@@ -24,8 +24,10 @@ COPY tsconfig.json next.config.js postcss.config.js tailwind.config.js next-env.
 COPY app ./app
 COPY components ./components
 COPY lib ./lib
+COPY hooks ./hooks
 COPY locales ./locales
 COPY public ./public
+COPY middleware.ts ./middleware.ts
 
 ARG NEXT_PUBLIC_BRAIN_API_URL=https://brain.inite.ai
 ENV NEXT_PUBLIC_BRAIN_API_URL=$NEXT_PUBLIC_BRAIN_API_URL
