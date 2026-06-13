@@ -1,15 +1,15 @@
--- 0013_active_window_fn — temporarily NOOP.
+-- 0013_active_window_fn — NOOP (intentionally).
 --
--- Bundled the fuzzy entity-name index here originally, but the SAME
--- SurrealDB feature audit-pass shipped behaviour changes in admin
--- graph-search code AND ontology bootstrap that ALSO ran for the
--- first time. A user-reported 500 on /demo/chat couldn't be triaged
--- without log access, so the migration was trimmed to a NOOP to
--- eliminate it as a suspect. The fuzzy-index DDL will return in a
--- later migration once the chat path is verified green again.
+-- This migration originally bundled fn::active_window + an entity fuzzy
+-- index. The function syntax wasn't exercised by any caller at ship
+-- time, so when its body tripped the SurrealDB parser the whole
+-- migration failed and every withCompany call after that 500'd. The
+-- function and index were both removed pending verification through a
+-- real caller; the file must remain (with a different migration id
+-- would orphan the schema_migrations row) but must be a valid no-op.
 --
--- This file still needs to exist (an empty surql is fine) so the
--- migration-runner's manifest stays sequential — schema_migrations
--- already records this id on tenants that previously applied the
--- earlier 0013 version.
-SELECT 1;
+-- SurrealQL has no "valid no-op statement" — `SELECT 1` requires FROM,
+-- `RETURN 1` only works inside functions. The safest representation is
+-- an all-comment file (matches the pattern used by 0010), which the
+-- migrator's conn.query() parses to an empty statement list — accepted,
+-- no side effects.
