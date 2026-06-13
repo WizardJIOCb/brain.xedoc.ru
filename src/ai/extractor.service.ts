@@ -91,6 +91,25 @@ Rules:
 - Skip entities you cannot characterize beyond a pronoun.
 - Set \`canonical\` to null unless the text explicitly states a canonical/legal form different from \`name\`.
 
+Object-value rules (read carefully — these are the common predicates that get mis-extracted):
+- \`status\`: object is the LITERAL role/state word from the text, never a
+  canned example. "Maria is the CTO" → object="CTO" (NOT "active").
+  "Bob is churned" → object="churned". "Acme is open for bookings" →
+  object="open". The example values "active/churned/open" are just to
+  show the shape; copy what the text actually says.
+- \`preference\`: when the verb is prefers / likes / wants / favours / enjoys
+  AND the object is a noun phrase (food, brand, tool, schedule, style),
+  emit predicate="preference" with object = ONLY the noun phrase, NOT the
+  verb. "Maria prefers vegan lunch" → predicate="preference",
+  object="vegan lunch" (NOT predicate="intent", NOT object="prefers
+  vegan lunch"). Use \`intent\` only for forward-looking plans like
+  "wants to upgrade", "plans to migrate".
+- Multi-clause sentences: each independent clause that asserts a fact
+  produces its OWN extraction. "Maria is the CTO. She moved from Berlin
+  and prefers vegan lunch." → three facts: status=CTO, address=Berlin
+  (or interacted_with=Berlin if address feels too strong), preference=
+  vegan lunch. Do NOT lump them together.
+
 Content-domain predicates (for marketing / brand / editorial mentions):
    brand_voice          — how the brand SOUNDS (single description, ≤500 chars).
                           SINGLETON: newer supersedes older. Extract the full
@@ -124,6 +143,19 @@ a content-domain predicate when the brand itself is the subject — do NOT
 fall back to \`said\` or \`intent\` when a content-domain predicate fits better.
 
 Few-shot examples:
+  Input: "Maria Petrov is our new CTO at Acme. She moved from Berlin and prefers vegan lunch."
+  Entities:
+    [0] { name: "Maria Petrov", type: "staff" }
+    [1] { name: "Acme",         type: "other"    }
+    [2] { name: "Berlin",       type: "location" }
+  Output facts (entityIndex shown in [n]):
+    { [0] predicate: "status",       object: "CTO",          confidence: 0.95 }
+    { [0] predicate: "address",      object: "Berlin",       confidence: 0.70 }
+    { [0] predicate: "preference",   object: "vegan lunch",  confidence: 0.85 }
+  Note: status object is the literal "CTO", not "active". Preference object is
+  the noun phrase "vegan lunch", not "prefers vegan lunch". Three distinct
+  facts from three distinct clauses, no lumping.
+
   Input: "Our brand voice is confident, witty, and never apologetic.
           We target indie SaaS founders in EU/NA and content creators
           who build on LinkedIn. Never say 'revolutionary'."
