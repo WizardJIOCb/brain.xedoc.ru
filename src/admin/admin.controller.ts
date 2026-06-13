@@ -445,6 +445,38 @@ export class AdminController {
     }
   }
 
+  @Get('demo/state')
+  @RequireScopes('brain:admin')
+  async demoState() {
+    try {
+      const counts = await this.surreal.withCompany(
+        DEMO_LIVE_COMPANY,
+        async (db) => {
+          const [eRows, fRows, lastRows] = (await db.query<
+            [
+              Array<{ c: number }>,
+              Array<{ c: number }>,
+              Array<{ recordedAt?: string }>,
+            ]
+          >(
+            `SELECT count() AS c FROM knowledge_entity WHERE mergedInto IS NONE GROUP ALL;
+             SELECT count() AS c FROM knowledge_fact WHERE retractedAt IS NONE GROUP ALL;
+             SELECT recordedAt FROM knowledge_fact ORDER BY recordedAt DESC LIMIT 1;`,
+          )) as any;
+          const entities = (eRows as Array<{ c: number }>)?.[0]?.c ?? 0;
+          const facts = (fRows as Array<{ c: number }>)?.[0]?.c ?? 0;
+          const lastAt =
+            (lastRows as Array<{ recordedAt?: string }>)?.[0]?.recordedAt;
+          return { entities, facts, lastIngestAt: lastAt ?? null };
+        },
+      );
+      return counts;
+    } catch {
+      // Tenant doesn't exist yet — that's a clean state, not an error.
+      return { entities: 0, facts: 0, lastIngestAt: null };
+    }
+  }
+
   @Post('demo/reset')
   @RequireScopes('brain:admin')
   async demoReset() {

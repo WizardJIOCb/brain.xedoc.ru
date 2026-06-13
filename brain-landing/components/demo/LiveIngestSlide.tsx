@@ -1,7 +1,8 @@
 'use client'
 
-import { FormEvent, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useState } from 'react'
 import {
+  AlertTriangle,
   ArrowRight,
   Loader2,
   MessageSquare,
@@ -107,11 +108,33 @@ const STARTERS = [
   'what did Maria eat in February',
 ]
 
+interface TenantState {
+  entities: number
+  facts: number
+  lastIngestAt: string | null
+}
+
 export function LiveIngestSlide() {
   const [message, setMessage] = useState(STARTERS[0])
   const [includePii, setIncludePii] = useState(false)
   const [turns, setTurns] = useState<Turn[]>([])
   const [busy, setBusy] = useState(false)
+  const [tenantState, setTenantState] = useState<TenantState | null>(null)
+
+  const refreshState = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/proxy/v1/admin/demo/state')
+      if (!res.ok) return
+      const data = (await res.json()) as TenantState
+      setTenantState(data)
+    } catch {
+      // Best-effort — state guard is helpful, not load-bearing.
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshState()
+  }, [refreshState])
 
   const submit = async (e?: FormEvent) => {
     e?.preventDefault()
@@ -139,6 +162,7 @@ export function LiveIngestSlide() {
             : x,
         ),
       )
+      refreshState()
     } catch (err) {
       setTurns((t) =>
         t.map((x) =>
@@ -198,6 +222,7 @@ export function LiveIngestSlide() {
     try {
       await fetch('/api/admin/proxy/v1/admin/demo/reset', { method: 'POST' })
       setTurns([])
+      await refreshState()
     } finally {
       setBusy(false)
     }
@@ -210,9 +235,41 @@ export function LiveIngestSlide() {
       title="Скажите brain. Спросите brain. Без переключения режимов."
       subtitle="Один чат сбоку у LLM. Brain сам решает: утверждение — извлекаю факты, вопрос — ищу. «Вчера / yesterday / в марте» автоматом превращаются в asOf. Lazy identity-резолвинг происходит в моменте по сильному сигналу — как у человека. Deep resolve остаётся на фон/ночь, вот он рядом кнопкой."
     >
+      {tenantState && tenantState.facts > 0 && turns.length === 0 && (
+        <div className="mb-6 border border-[var(--warning)]/40 bg-[var(--warning)]/5 rounded-lg p-4 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-[var(--warning)] shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <div className="text-sm text-[var(--text)] font-medium">
+              tenant carries {tenantState.entities} entities ·{' '}
+              {tenantState.facts} facts from a previous session
+            </div>
+            <div className="text-xs text-[var(--text-muted)] mt-0.5">
+              {tenantState.lastIngestAt &&
+                `last ingest ${tenantState.lastIngestAt.slice(0, 16)}. `}
+              demo поверх старых данных запутает search и LLM-контекст —
+              почисти перед началом доклада.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={reset}
+            disabled={busy}
+            className="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-[var(--warning)] text-white text-sm disabled:opacity-50"
+          >
+            <Trash2 className="w-4 h-4" />
+            start clean
+          </button>
+        </div>
+      )}
+
       <div className="flex items-center gap-4 mb-6">
         <span className="text-xs font-mono text-[var(--text-faint)]">
           tenant: demo_live
+          {tenantState && (
+            <span className="ml-2 text-[var(--text-muted)]">
+              · {tenantState.entities} ent · {tenantState.facts} facts
+            </span>
+          )}
         </span>
         <label className="text-xs text-[var(--text-muted)] flex items-center gap-1.5 select-none">
           <input
