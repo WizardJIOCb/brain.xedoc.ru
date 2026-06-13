@@ -24,6 +24,11 @@ export function PiiSlide() {
           hasResult={!!r.result}
           durationMs={r.result?.durationMs}
           passed={r.result?.passed}
+          setupErrors={r.result?.setupSummary.errors}
+          queryErrors={r.result?.queryResults.map((q) => ({
+            query: q.query,
+            error: q.error,
+          }))}
           onRun={() => r.run(SCENARIO_ID)}
         />
         {r.error && (
