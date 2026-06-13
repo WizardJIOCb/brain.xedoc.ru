@@ -49,6 +49,11 @@ interface FactMatch {
   vector: number | null
   lexical: number | null
   backfill: boolean
+  /** Set when the parent strategy is 'graph' — entity was pinned by canonical
+   *  name match against the router's entityRefs / a substring of the question,
+   *  and every fact on the entity rides along. This is the "subject-pinned"
+   *  signal: brain hit the graph directly, no embedding leg involved. */
+  subject?: boolean
 }
 
 interface BrainFact {
@@ -668,6 +673,16 @@ function FactRow({ fact }: { fact: BrainFact }) {
 }
 
 function MatchBadge({ match }: { match: FactMatch }) {
+  if (match.subject) {
+    return (
+      <span
+        className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)]"
+        title="subject pinned — entity matched the question's named subject by canonical name. Brain walked the graph straight to its facts, no embeddings involved."
+      >
+        graph
+      </span>
+    )
+  }
   if (match.backfill) {
     return (
       <span
@@ -696,6 +711,22 @@ function HitWhy({ facts }: { facts: BrainFact[] }) {
   // the result set vs which rode along as backfill. This is the
   // 'why is Vasya here when I asked about Maria' answer.
   const matched = facts.filter((f) => f.match && !f.match.backfill)
+  // Graph strategy puts every fact under `subject:true` — a uniform pin via
+  // canonical-name match. Render that explicitly instead of trying to pick
+  // a "top" fact (vector scores don't exist on this path).
+  const isSubjectPin = matched.length > 0 && matched.every((f) => f.match?.subject)
+  if (isSubjectPin) {
+    const predicates = Array.from(
+      new Set(matched.map((f) => `${f.predicate}=${f.object}`)),
+    ).slice(0, 4)
+    return (
+      <div className="ml-7 mt-0.5 text-[10px] font-mono text-[var(--text-faint)]">
+        graph · subject pinned by canonical-name match — pulled {matched.length} fact
+        {matched.length === 1 ? '' : 's'}
+        {predicates.length > 0 ? `: ${predicates.join(', ')}` : ''}
+      </div>
+    )
+  }
   if (matched.length === 0) {
     return (
       <div className="ml-7 mt-0.5 text-[10px] font-mono text-[var(--text-faint)]">

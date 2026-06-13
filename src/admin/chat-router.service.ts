@@ -81,24 +81,42 @@ duplicate people / orgs across mentions):
   that resolves to one of them) that UNAMBIGUOUSLY matches exactly one known
   name, rewrite the message to use the full canonical form.
 
-  Example: known names = ["Maria Petrov", "Acme"], message = "Maria switched to keto"
-    → normalizedMessage = "Maria Petrov now prefers keto"
-    → cleanedQuery     = "Maria Petrov diet" (for ask intent)
+  HARD RULE — normalizedMessage MUST preserve every clause / fact in the original
+  message. Substitute names only. DO NOT drop clauses. DO NOT summarise. DO NOT
+  collapse a multi-fact sentence into one fact. Word count should stay within
+  ±25% of the original. If you find yourself shortening, you are doing it wrong.
 
-  If the short reference matches MORE than one known name, do NOT rewrite —
-  leave the original message in place and let the operator clarify.
+  Allowed transformations on normalizedMessage:
+    1. Replace a short entity reference with its canonical form
+       ("Maria" → "Maria Petrov", "she" → "Maria Petrov" when antecedent is clear).
+    2. Replace change-of-state verbs with a present-tense predicate noun, but
+       ONLY the verb phrase — every other clause stays verbatim:
+         "switched to keto"     → "now prefers keto"
+         "moved to Berlin"      → "now lives in Berlin"
+         "started using Stripe" → "uses Stripe"
+       This helps the downstream extractor classify the fact as a stable
+       preference / location / tool rather than a transient action.
+    3. Strip a leading temporal anchor ("since February", "last month") IF you
+       returned it as validFrom — the timestamp is captured separately and
+       repeating it adds nothing.
 
-Tell normalisation (to keep extraction predicates clean):
-  When intent="tell" describes a change of state — "switched to X", "now uses X",
-  "moved to X", "changed to X", "started X" — rewrite normalizedMessage with a
-  present-tense predicate that names the resulting state directly:
-    "switched to keto"     → "now prefers keto"
-    "moved to Berlin"      → "now lives in Berlin"
-    "started using Stripe" → "uses Stripe"
-  This lets the downstream extractor classify the fact as a stable preference /
-  location / tool instead of a transient "intent" or "action" predicate. Combined
-  with validFrom this is what makes bitemporal "what did X eat 2 months ago"
-  return the previous state.
+  Example (multi-fact):
+    known = ["Maria Petrov"], message =
+      "since February Maria is our new CTO at Acme. She moved from Berlin and prefers vegan lunch."
+    →
+      normalizedMessage = "Maria Petrov is our new CTO at Acme. Maria Petrov lives in Berlin and prefers vegan lunch."
+      validFrom         = <Feb 1 ISO>
+    Note: three facts in the original — CTO@Acme, lives-in Berlin, prefers vegan
+    lunch. THREE facts in the normalized form. None dropped.
+
+  Example (short ref + change of state, single fact):
+    known = ["Maria Petrov"], message = "Maria switched to keto last month"
+    →
+      normalizedMessage = "Maria Petrov now prefers keto"
+      validFrom         = <1 month ago ISO>
+
+  If a short reference matches MORE than one known name, leave the original
+  message in place and let the operator clarify.
 
 Entity references (CRITICAL for retrieval):
   Return entityRefs — the subset of "known canonical names" that the
@@ -223,7 +241,30 @@ message: ${message}`;
         parsed.normalizedMessage.trim() &&
         parsed.normalizedMessage !== message
       ) {
-        out.normalizedMessage = parsed.normalizedMessage;
+        // Guardrail: an over-eager LLM has been observed turning multi-fact
+        // tells like "Maria is CTO. She moved from Berlin and prefers vegan
+        // lunch." into a single-clause "Maria now serves as CTO" — silently
+        // dropping facts. Reject any rewrite that compresses the original
+        // by more than 40% of word count and fall back to the original
+        // message. The validFrom / entityRefs fields are still trusted.
+        const origWords = message.trim().split(/\s+/).filter(Boolean).length;
+        const normWords = parsed.normalizedMessage
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean).length;
+        if (origWords >= 8 && normWords < origWords * 0.6) {
+          this.logger.warn(
+            `chat router rewrite dropped too many words ` +
+              `(${origWords}→${normWords}); falling back to original`,
+          );
+          traceArtifact('demo.chat.rewrite_rejected', {
+            origWords,
+            normWords,
+            normalized: parsed.normalizedMessage,
+          });
+        } else {
+          out.normalizedMessage = parsed.normalizedMessage;
+        }
       }
       if (parsed.cleanedQuery) out.cleanedQuery = parsed.cleanedQuery;
       // Only keep entityRefs that are actually in the known list — guard

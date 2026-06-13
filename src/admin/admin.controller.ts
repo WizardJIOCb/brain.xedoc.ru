@@ -432,6 +432,7 @@ export class AdminController {
         results: this.enrichResults(
           captured.result.search.results,
           captured.trace.artifacts,
+          captured.result.strategy,
         ),
       };
     }
@@ -477,6 +478,7 @@ export class AdminController {
   private enrichResults(
     results: any[],
     artifacts: Array<{ name: string; value: unknown }> = [],
+    strategy: 'graph' | 'graph→vector' = 'graph→vector',
   ): any[] {
     const vec = new Map<string, number>();
     const lex = new Map<string, number>();
@@ -502,14 +504,37 @@ export class AdminController {
         const factId = String(f.factId);
         const vScore = vec.get(factId) ?? null;
         const lScore = lex.get(factId) ?? null;
-        const match =
-          vScore !== null || lScore !== null
-            ? {
-                vector: vScore,
-                lexical: lScore,
-                backfill: false,
-              }
-            : { vector: null, lexical: null, backfill: true };
+        // Match shape encodes WHY this fact made it into the result set.
+        //  - graph strategy: subject was pinned by canonical-name match,
+        //    every fact on the entity rides along. That's a 'subject' match —
+        //    NOT backfill (backfill = pulled in by bitemporal closure of a
+        //    DIFFERENT entity that hit vector/lexical, which only happens on
+        //    the vector path).
+        //  - graph→vector: facts either hit a retrieval leg directly
+        //    (vector / lexical scores) or are backfill from the
+        //    bitemporal closure on the hit entity.
+        let match: {
+          vector: number | null;
+          lexical: number | null;
+          backfill: boolean;
+          subject?: boolean;
+        };
+        if (strategy === 'graph') {
+          match = {
+            vector: null,
+            lexical: null,
+            backfill: false,
+            subject: true,
+          };
+        } else if (vScore !== null || lScore !== null) {
+          match = {
+            vector: vScore,
+            lexical: lScore,
+            backfill: false,
+          };
+        } else {
+          match = { vector: null, lexical: null, backfill: true };
+        }
         return {
           ...f,
           policy: {
