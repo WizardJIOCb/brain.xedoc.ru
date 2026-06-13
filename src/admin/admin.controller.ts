@@ -295,6 +295,25 @@ export class AdminController {
     };
   }
 
+  @Post('demo/dreams')
+  @RequireScopes('brain:admin')
+  async demoDreams(@Body() body: { operations?: ('dedup' | 'resolve')[] }) {
+    const captured = await runWithDebugTrace(() =>
+      this.dreams.runForTenant(
+        DEMO_LIVE_COMPANY,
+        body?.operations ?? ['dedup', 'resolve'],
+      ),
+    );
+    return {
+      ...captured.result,
+      trace: {
+        requestId: captured.trace.requestId,
+        totalMs: captured.trace.totalMs,
+        spans: captured.trace.spans,
+      },
+    };
+  }
+
   @Post('demo/reset')
   @RequireScopes('brain:admin')
   async demoReset() {

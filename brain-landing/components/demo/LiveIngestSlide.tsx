@@ -4,10 +4,9 @@ import { FormEvent, useState } from 'react'
 import {
   ArrowRight,
   Loader2,
-  RotateCcw,
   Search,
   Send,
-  ShieldAlert,
+  Sparkles,
   Trash2,
 } from 'lucide-react'
 import { DemoFrame } from './DemoFrame'
@@ -53,15 +52,23 @@ interface SearchResp {
   trace?: TracePayload
 }
 
+interface DreamsResult {
+  dedup?: { identityLinksCreated?: number; pairsConsidered?: number }
+  resolve?: { resolutionsApplied?: number }
+  trace?: TracePayload
+}
+
 interface ChatTurn {
   id: string
-  kind: 'ingest' | 'search'
+  kind: 'ingest' | 'search' | 'dreams'
   prompt: string
   pending: boolean
   error?: string
   ingest?: IngestResult
   search?: SearchResp
+  dreams?: DreamsResult
   includePii?: boolean
+  asOf?: string
 }
 
 const STARTER_MESSAGE =
@@ -72,6 +79,7 @@ export function LiveIngestSlide() {
   const [text, setText] = useState(STARTER_MESSAGE)
   const [query, setQuery] = useState(STARTER_QUERY)
   const [includePii, setIncludePii] = useState(false)
+  const [asOf, setAsOf] = useState('')
   const [turns, setTurns] = useState<ChatTurn[]>([])
   const [busy, setBusy] = useState(false)
 
@@ -122,16 +130,29 @@ export function LiveIngestSlide() {
     if (!query.trim() || busy) return
     const id = crypto.randomUUID()
     const q = query
+    const asOfIso = asOf ? new Date(asOf).toISOString() : undefined
     setTurns((t) => [
       ...t,
-      { id, kind: 'search', prompt: q, pending: true, includePii },
+      {
+        id,
+        kind: 'search',
+        prompt: q,
+        pending: true,
+        includePii,
+        asOf: asOfIso,
+      },
     ])
     setBusy(true)
     try {
       const res = await fetch('/api/admin/proxy/v1/admin/demo/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, includePii, limit: 5 }),
+        body: JSON.stringify({
+          query: q,
+          includePii,
+          limit: 5,
+          ...(asOfIso ? { asOf: asOfIso } : {}),
+        }),
       })
       const data = await res.json()
       setTurns((t) =>
@@ -170,6 +191,51 @@ export function LiveIngestSlide() {
     }
   }
 
+  const runDreams = async () => {
+    if (busy) return
+    const id = crypto.randomUUID()
+    setTurns((t) => [
+      ...t,
+      {
+        id,
+        kind: 'dreams',
+        prompt: 'dreams · dedup + identity-resolve',
+        pending: true,
+      },
+    ])
+    setBusy(true)
+    try {
+      const res = await fetch('/api/admin/proxy/v1/admin/demo/dreams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operations: ['dedup', 'resolve'] }),
+      })
+      const data = await res.json()
+      setTurns((t) =>
+        t.map((x) =>
+          x.id === id
+            ? {
+                ...x,
+                pending: false,
+                dreams: res.ok ? data : undefined,
+                error: res.ok ? undefined : data?.error ?? `${res.status}`,
+              }
+            : x,
+        ),
+      )
+    } catch (err) {
+      setTurns((t) =>
+        t.map((x) =>
+          x.id === id
+            ? { ...x, pending: false, error: (err as Error).message }
+            : x,
+        ),
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <DemoFrame
       slideNumber="01a"
@@ -177,15 +243,25 @@ export function LiveIngestSlide() {
       title="Скажите brain. Спросите brain. Увидите разницу."
       subtitle="Слева — сырой разговор. Справа — что brain извлёк: атомарные факты с предикатом, объектом и confidence. Дальше — поиск против накопленного состояния."
     >
-      <div className="flex items-center gap-3 mb-6">
+      <div className="flex items-center gap-4 mb-6">
         <span className="text-xs font-mono text-[var(--text-faint)]">
           tenant: demo_live
         </span>
         <button
           type="button"
+          onClick={runDreams}
+          disabled={busy || turns.length === 0}
+          title="run identity-resolution dream — merges duplicate entities surfaced by NLU"
+          className="inline-flex items-center gap-1.5 text-xs text-[var(--accent)] hover:text-[var(--accent-hover)] disabled:opacity-40"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          run dreams · resolve identities
+        </button>
+        <button
+          type="button"
           onClick={reset}
           disabled={busy || turns.length === 0}
-          className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-40 ml-auto"
         >
           <Trash2 className="w-3.5 h-3.5" />
           reset tenant
@@ -238,7 +314,7 @@ export function LiveIngestSlide() {
               className="w-full bg-transparent text-base text-[var(--text)] outline-none placeholder:text-[var(--text-faint)]"
               placeholder="who runs engineering at Acme"
             />
-            <div className="mt-3 flex items-center justify-between gap-2">
+            <div className="mt-3 flex flex-wrap items-center gap-3">
               <label className="text-xs text-[var(--text-muted)] flex items-center gap-1.5 select-none">
                 <input
                   type="checkbox"
@@ -247,10 +323,28 @@ export function LiveIngestSlide() {
                 />
                 include brain:read_pii
               </label>
+              <label className="text-xs text-[var(--text-muted)] flex items-center gap-1.5">
+                asOf
+                <input
+                  type="datetime-local"
+                  value={asOf}
+                  onChange={(e) => setAsOf(e.target.value)}
+                  className="bg-transparent border border-[var(--border)] rounded px-1 py-0.5 text-[10px] font-mono text-[var(--text)]"
+                />
+                {asOf && (
+                  <button
+                    type="button"
+                    onClick={() => setAsOf('')}
+                    className="text-[var(--text-faint)] hover:text-[var(--text)] text-xs"
+                  >
+                    ✕
+                  </button>
+                )}
+              </label>
               <button
                 type="submit"
                 disabled={busy || !query.trim()}
-                className="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-[var(--accent)] text-white text-sm disabled:opacity-50"
+                className="ml-auto inline-flex items-center gap-2 h-9 px-4 rounded-md bg-[var(--accent)] text-white text-sm disabled:opacity-50"
               >
                 {busy ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -268,7 +362,9 @@ export function LiveIngestSlide() {
               <li>1. ingest «Maria Petrov is our new CTO at Acme. Berlin. Vegan.»</li>
               <li>2. ask «who runs engineering at Acme» → Maria</li>
               <li>3. ingest «Maria switched to keto last month.»</li>
-              <li>4. ask «Maria diet preference» → keto (vegan superseded)</li>
+              <li>4. ask «Maria diet preference» → keto, vegan superseded</li>
+              <li>5. если NLU создал дубль из-за typo — жми run dreams</li>
+              <li>6. asOf-пикером выставь время — bitemporal slice вживую</li>
             </ul>
           </div>
         </div>
@@ -297,21 +393,31 @@ export function LiveIngestSlide() {
 }
 
 function TurnCard({ turn }: { turn: ChatTurn }) {
+  const eyebrowColor =
+    turn.kind === 'ingest'
+      ? 'text-[var(--accent)]'
+      : turn.kind === 'search'
+        ? 'text-[var(--warning)]'
+        : 'text-[var(--accent)]'
+  const eyebrow =
+    turn.kind === 'ingest' ? 'tell' : turn.kind === 'search' ? 'ask' : 'dreams'
+
   return (
     <div className="border border-[var(--border)] rounded-lg p-4 bg-[var(--bg-elevated)]">
-      <div className="flex items-baseline gap-2 mb-2">
+      <div className="flex items-baseline gap-2 mb-2 flex-wrap">
         <span
-          className={`text-[10px] uppercase tracking-[0.2em] ${
-            turn.kind === 'ingest'
-              ? 'text-[var(--accent)]'
-              : 'text-[var(--warning)]'
-          }`}
+          className={`text-[10px] uppercase tracking-[0.2em] ${eyebrowColor}`}
         >
-          {turn.kind === 'ingest' ? 'tell' : 'ask'}
+          {eyebrow}
         </span>
         {turn.kind === 'search' && turn.includePii && (
           <span className="text-[10px] font-mono text-[var(--text-faint)]">
             +read_pii
+          </span>
+        )}
+        {turn.kind === 'search' && turn.asOf && (
+          <span className="text-[10px] font-mono text-[var(--text-faint)]">
+            asOf {turn.asOf.slice(0, 16)}
           </span>
         )}
         {turn.pending && (
@@ -330,6 +436,40 @@ function TurnCard({ turn }: { turn: ChatTurn }) {
 
       {turn.kind === 'ingest' && turn.ingest && <IngestBody data={turn.ingest} />}
       {turn.kind === 'search' && turn.search && <SearchBody data={turn.search} />}
+      {turn.kind === 'dreams' && turn.dreams && <DreamsBody data={turn.dreams} />}
+    </div>
+  )
+}
+
+function DreamsBody({ data }: { data: DreamsResult }) {
+  const dedupLinks = data.dedup?.identityLinksCreated ?? 0
+  const resolveApplied = data.resolve?.resolutionsApplied ?? 0
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-faint)]">
+            dedup
+          </div>
+          <div className="font-mono text-[var(--text)]">
+            {dedupLinks} identity_of links
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-faint)]">
+            resolve
+          </div>
+          <div className="font-mono text-[var(--text)]">
+            {resolveApplied} resolutions
+          </div>
+        </div>
+      </div>
+      {dedupLinks === 0 && resolveApplied === 0 && (
+        <div className="text-xs text-[var(--text-faint)] italic">
+          ничего не нашли — отдельные сущности или порог сходства не пройден
+        </div>
+      )}
+      <DemoTraceStrip trace={data.trace} />
     </div>
   )
 }
