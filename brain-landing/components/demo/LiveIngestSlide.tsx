@@ -10,7 +10,8 @@ import {
   Trash2,
 } from 'lucide-react'
 import { DemoFrame } from './DemoFrame'
-import { DemoTraceStrip, TracePayload as BaseTracePayload } from './DemoTraceStrip'
+import { TracePayload as BaseTracePayload } from './DemoTraceStrip'
+import { DemoEngineView } from './DemoEngineView'
 
 interface TraceArtifact {
   spanId?: string
@@ -443,7 +444,7 @@ function IngestBody({
         </ul>
       )}
 
-      <DemoTraceStrip trace={trace} />
+      <DemoEngineView trace={trace} />
     </div>
   )
 }
@@ -510,7 +511,7 @@ function SearchBody({
           </li>
         ))}
       </ul>
-      <DemoTraceStrip trace={trace} />
+      <DemoEngineView trace={trace} />
     </div>
   )
 }
@@ -543,7 +544,7 @@ function DreamsBody({ data }: { data: DreamsResp }) {
           ничего не нашли — отдельные сущности или порог сходства не пройден
         </div>
       )}
-      <DemoTraceStrip trace={data.trace} />
+      <DemoEngineView trace={data.trace} />
     </div>
   )
 }
