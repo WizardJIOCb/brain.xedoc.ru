@@ -39,7 +39,7 @@ export default function ScenarioDetailPage() {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isolateTenant: true, keepTenant }),
+          body: JSON.stringify({ keepTenant }),
         },
       )
       const data = (await res.json()) as ScenarioRunOutcome | { error?: string }

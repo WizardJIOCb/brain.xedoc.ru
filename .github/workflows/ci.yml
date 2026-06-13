@@ -54,12 +54,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Checkout inside the workspace (actions/checkout refuses paths
+      # outside GITHUB_WORKSPACE since v3). Then symlink to ../inite-shared
+      # so tsconfig.json's "@inite/knowledge" path alias resolves at compile
+      # and test time without changing source.
       - name: Checkout inite-shared (sibling for SDK source)
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/inite-shared
-          path: ../inite-shared
+          path: inite-shared-checkout
           token: ${{ secrets.INITE_SHARED_PAT || github.token }}
+
+      - name: Symlink inite-shared as sibling
+        run: ln -sf "$GITHUB_WORKSPACE/inite-shared-checkout" "$GITHUB_WORKSPACE/../inite-shared"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -104,12 +111,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Checkout inside the workspace (actions/checkout refuses paths
+      # outside GITHUB_WORKSPACE since v3). Then symlink to ../inite-shared
+      # so tsconfig.json's "@inite/knowledge" path alias resolves at compile
+      # and test time without changing source.
       - name: Checkout inite-shared (sibling for SDK source)
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/inite-shared
-          path: ../inite-shared
+          path: inite-shared-checkout
           token: ${{ secrets.INITE_SHARED_PAT || github.token }}
+
+      - name: Symlink inite-shared as sibling
+        run: ln -sf "$GITHUB_WORKSPACE/inite-shared-checkout" "$GITHUB_WORKSPACE/../inite-shared"
 
       - uses: pnpm/action-setup@v4
         with:

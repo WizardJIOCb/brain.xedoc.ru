@@ -1,7 +1,9 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -73,36 +75,43 @@ export class AdminController {
   @Post('scenarios/:id/run')
   @RequireScopes('brain:admin')
   async runScenario(
-    @Req() req: AuthenticatedRequest,
     @Param('id') id: string,
-    @Body() body: { isolateTenant?: boolean; keepTenant?: boolean },
+    @Body() body: { keepTenant?: boolean },
   ) {
     return this.scenarios.runOne(id, {
-      isolateTenant: body?.isolateTenant !== false,
       keepTenant: body?.keepTenant === true,
-      defaultCompanyId: req.brainAuth.companyId,
     });
   }
 
+  /**
+   * Synchronous batch — capped at BATCH_CAP scenarios per request so a long
+   * tail of LLM-bound scenarios can't outrun Traefik / Node respond timeouts.
+   * For full-suite runs the operator iterates from the UI; SSE / async-job
+   * paths are tracked for a follow-up.
+   */
   @Post('scenarios/run-batch')
   @RequireScopes('brain:admin')
   async runBatch(
-    @Req() req: AuthenticatedRequest,
-    @Body() body: { ids?: string[]; vertical?: string; isolateTenant?: boolean },
+    @Body() body: { ids?: string[]; vertical?: string; keepTenant?: boolean },
   ) {
+    const BATCH_CAP = 10;
     const all = this.scenarios.list();
-    const ids = body.ids?.length
+    const candidate = body.ids?.length
       ? body.ids
       : body.vertical
         ? all.filter((s) => s.vertical === body.vertical).map((s) => s.id)
         : all.map((s) => s.id);
+    if (candidate.length > BATCH_CAP) {
+      throw new BadRequestException(
+        `Too many scenarios (${candidate.length}). Cap is ${BATCH_CAP} per call — split into multiple requests.`,
+      );
+    }
     const outcomes: ScenarioRunOutcome[] = [];
-    for (const id of ids) {
+    for (const id of candidate) {
       try {
         outcomes.push(
           await this.scenarios.runOne(id, {
-            isolateTenant: body.isolateTenant !== false,
-            defaultCompanyId: req.brainAuth.companyId,
+            keepTenant: body?.keepTenant === true,
           }),
         );
       } catch (e) {
@@ -144,7 +153,7 @@ export class AdminController {
     @Body() body: { outcomes: ScenarioRunOutcome[] },
   ) {
     if (!body?.outcomes?.length) {
-      throw new NotFoundException('outcomes required');
+      throw new BadRequestException('outcomes[] required and must be non-empty');
     }
     return this.baselines.save(name, body.outcomes);
   }
@@ -159,17 +168,25 @@ export class AdminController {
   }
 
   // ── Traces ─────────────────────────────────────────────────────────
+  //
+  // Trace records are scoped to the caller's companyId. The interceptor
+  // refuses to write snapshots for non-admin callers in the first place,
+  // and the buffer filter here keeps one admin from reading another
+  // tenant's artifacts. There is intentionally no super-admin global view.
 
   @Get('traces')
   @RequireScopes('brain:admin')
-  listTraces() {
-    return { traces: this.traces.list() };
+  listTraces(@Req() req: AuthenticatedRequest) {
+    return { traces: this.traces.list(req.brainAuth.companyId) };
   }
 
   @Get('traces/:requestId')
   @RequireScopes('brain:admin')
-  getTrace(@Param('requestId') requestId: string) {
-    const t = this.traces.get(requestId);
+  getTrace(
+    @Req() req: AuthenticatedRequest,
+    @Param('requestId') requestId: string,
+  ) {
+    const t = this.traces.get(requestId, req.brainAuth.companyId);
     if (!t) throw new NotFoundException(`Trace ${requestId} not found`);
     return t;
   }
@@ -179,9 +196,12 @@ export class AdminController {
   @Delete('tenants/:companyId')
   @RequireScopes('brain:admin')
   async dropTenant(@Param('companyId') companyId: string) {
+    // Only ephemeral eval tenants can be dropped via the admin API.
+    // This is the safe-by-default rule — operator can never accidentally
+    // drop a real `co_<companyId>` database through this surface.
     if (!companyId.startsWith('eval_')) {
-      throw new NotFoundException(
-        `Only ephemeral eval tenants can be dropped via admin API (got: ${companyId})`,
+      throw new ForbiddenException(
+        `Only ephemeral eval_* tenants can be dropped via admin API`,
       );
     }
     await this.surreal.dropCompanyDatabase(companyId);

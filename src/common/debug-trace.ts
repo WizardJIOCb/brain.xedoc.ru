@@ -7,7 +7,7 @@ import {
   NestInterceptor,
 } from '@nestjs/common';
 import type { Request, Response, NextFunction } from 'express';
-import { Observable, map } from 'rxjs';
+import { Observable, catchError, map, throwError } from 'rxjs';
 
 export interface DebugSpan {
   id: string;
@@ -31,8 +31,8 @@ export interface DebugContext {
   startedAt: number;
   spans: DebugSpan[];
   artifacts: DebugArtifact[];
-  /** Stack of currently-open span ids (innermost on top). */
-  stack: string[];
+  /** Bounded counter — drops new artifacts past MAX_ARTIFACTS_PER_REQUEST. */
+  artifactsDropped: number;
 }
 
 export interface DebugTraceSnapshot {
@@ -45,22 +45,40 @@ export interface DebugTraceSnapshot {
   companyId?: string;
   spans: DebugSpan[];
   artifacts: DebugArtifact[];
+  /** Set when the underlying handler threw. */
+  errored?: { message: string; name?: string };
 }
 
-const als = new AsyncLocalStorage<DebugContext>();
+const requestAls = new AsyncLocalStorage<DebugContext>();
+/** Tracks the currently-active span id (innermost). Per-async-chain, so
+ *  concurrent sibling spans (e.g. vector+lexical run via Promise.all)
+ *  each see the correct parent without trampling a shared stack. */
+const spanAls = new AsyncLocalStorage<{ spanId: string }>();
 
 export function getDebugContext(): DebugContext | undefined {
-  return als.getStore();
+  return requestAls.getStore();
 }
 
 const MAX_ARTIFACT_SIZE = 32 * 1024;
+const MAX_ARTIFACTS_PER_REQUEST = 200;
 
 function safeArtifact(value: unknown): unknown {
   if (value === undefined || value === null) return value;
   try {
-    const json = typeof value === 'string' ? value : JSON.stringify(value);
+    if (typeof value === 'string') {
+      return value.length <= MAX_ARTIFACT_SIZE
+        ? value
+        : {
+            __truncated: true,
+            preview: value.slice(0, MAX_ARTIFACT_SIZE),
+            originalSize: value.length,
+          };
+    }
+    const json = JSON.stringify(value);
     if (json.length <= MAX_ARTIFACT_SIZE) {
-      return typeof value === 'string' ? value : value;
+      // Deep-clone via JSON round-trip so later in-place mutations in
+      // the producer code don't rewrite the captured artifact.
+      return JSON.parse(json);
     }
     return {
       __truncated: true,
@@ -77,35 +95,38 @@ export async function traceSpan<T>(
   fn: () => Promise<T>,
   attributes?: Record<string, unknown>,
 ): Promise<T> {
-  const ctx = als.getStore();
+  const ctx = requestAls.getStore();
   if (!ctx) return fn();
 
   const id = randomUUID();
-  const parentId = ctx.stack[ctx.stack.length - 1];
+  const parentId = spanAls.getStore()?.spanId;
   const startedAt = Date.now();
   const span: DebugSpan = { id, parentId, name, startedAt, attributes };
   ctx.spans.push(span);
-  ctx.stack.push(id);
   try {
-    const out = await fn();
-    span.durationMs = Date.now() - startedAt;
-    return out;
+    return await spanAls.run({ spanId: id }, async () => {
+      try {
+        return await fn();
+      } finally {
+        span.durationMs = Date.now() - startedAt;
+      }
+    });
   } catch (err) {
-    span.durationMs = Date.now() - startedAt;
+    span.durationMs = span.durationMs ?? Date.now() - startedAt;
     span.error = (err as Error)?.message ?? String(err);
     throw err;
-  } finally {
-    const top = ctx.stack[ctx.stack.length - 1];
-    if (top === id) ctx.stack.pop();
   }
 }
 
 export function traceArtifact(name: string, value: unknown): void {
-  const ctx = als.getStore();
+  const ctx = requestAls.getStore();
   if (!ctx) return;
-  const spanId = ctx.stack[ctx.stack.length - 1];
+  if (ctx.artifacts.length >= MAX_ARTIFACTS_PER_REQUEST) {
+    ctx.artifactsDropped += 1;
+    return;
+  }
   ctx.artifacts.push({
-    spanId,
+    spanId: spanAls.getStore()?.spanId,
     name,
     ts: Date.now(),
     value: safeArtifact(value),
@@ -120,10 +141,9 @@ export function debugTraceMiddleware() {
       startedAt: Date.now(),
       spans: [],
       artifacts: [],
-      stack: [],
+      artifactsDropped: 0,
     };
-    (req as unknown as { __debugCtx?: DebugContext }).__debugCtx = ctx;
-    als.run(ctx, () => next());
+    requestAls.run(ctx, () => next());
   };
 }
 
@@ -139,12 +159,28 @@ export class TraceBufferService {
     }
   }
 
-  list(): Array<Omit<DebugTraceSnapshot, 'spans' | 'artifacts'>> {
-    return this.buffer.map(({ spans: _s, artifacts: _a, ...rest }) => rest);
+  /**
+   * Operator-facing list — companyId optional so a caller with `brain:admin`
+   * on a tenant key only sees their own debug traces. (The interceptor
+   * already refuses to record snapshots for non-admin callers, so there is
+   * no per-row ACL beyond company scoping.)
+   */
+  list(
+    companyId?: string,
+  ): Array<Omit<DebugTraceSnapshot, 'spans' | 'artifacts'>> {
+    const rows = companyId
+      ? this.buffer.filter((s) => s.companyId === companyId)
+      : this.buffer;
+    return rows.map(({ spans: _s, artifacts: _a, ...rest }) => rest);
   }
 
-  get(requestId: string): DebugTraceSnapshot | undefined {
-    return this.buffer.find((s) => s.requestId === requestId);
+  get(requestId: string, companyId?: string): DebugTraceSnapshot | undefined {
+    const hit = this.buffer.find((s) => s.requestId === requestId);
+    if (!hit) return undefined;
+    if (companyId && hit.companyId && hit.companyId !== companyId) {
+      return undefined;
+    }
+    return hit;
   }
 }
 
@@ -153,56 +189,84 @@ export class DebugTraceInterceptor implements NestInterceptor {
   constructor(private readonly traceBuffer: TraceBufferService) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
-    const ctx = als.getStore();
+    const ctx = requestAls.getStore();
     if (!ctx) return next.handle();
 
     const http = context.switchToHttp();
     const req = http.getRequest<Request>();
     const res = http.getResponse<Response>();
 
-    const auth = (req as unknown as {
-      brainAuth?: { companyId: string; scopes: string[] };
-    }).brainAuth;
-    const isAdmin = !!auth?.scopes?.includes('brain:admin');
+    const captureSnapshot = (errored?: {
+      message: string;
+      name?: string;
+    }): DebugTraceSnapshot | null => {
+      const auth = (req as unknown as {
+        brainAuth?: { companyId: string; scopes: string[] };
+      }).brainAuth;
+      // Cross-tenant leakage guard: only admins get snapshots in the
+      // shared ring buffer. Non-admin callers can still emit X-Brain-Debug
+      // (and pay the in-flight ALS cost), but their artifacts evaporate
+      // when the request ends — no GET /admin/traces access exists for them.
+      const isAdmin = !!auth?.scopes?.includes('brain:admin');
+      if (!isAdmin) return null;
+      return {
+        requestId: ctx.requestId,
+        ts: new Date(ctx.startedAt).toISOString(),
+        method: req.method,
+        path: req.originalUrl ?? req.url,
+        status: res.statusCode,
+        durationMs: Date.now() - ctx.startedAt,
+        companyId: auth?.companyId,
+        spans: ctx.spans,
+        artifacts: ctx.artifacts,
+        ...(errored ? { errored } : {}),
+      };
+    };
+
+    const isAdmin = !!(
+      req as unknown as { brainAuth?: { scopes: string[] } }
+    ).brainAuth?.scopes?.includes('brain:admin');
 
     return next.handle().pipe(
+      catchError((err) => {
+        // Write the trace BEFORE the error propagates — otherwise the
+        // most diagnostically valuable traces (the failing ones) are
+        // silently dropped.
+        const snap = captureSnapshot({
+          message: (err as Error)?.message ?? String(err),
+          name: (err as Error)?.name,
+        });
+        if (snap) this.traceBuffer.add(snap);
+        return throwError(() => err);
+      }),
       map((body) => {
-        const totalMs = Date.now() - ctx.startedAt;
-        const snapshot: DebugTraceSnapshot = {
-          requestId: ctx.requestId,
-          ts: new Date(ctx.startedAt).toISOString(),
-          method: req.method,
-          path: req.originalUrl ?? req.url,
-          status: res.statusCode,
-          durationMs: totalMs,
-          companyId: auth?.companyId,
-          spans: ctx.spans,
-          artifacts: ctx.artifacts,
-        };
-        this.traceBuffer.add(snapshot);
+        const snap = captureSnapshot();
+        if (snap) this.traceBuffer.add(snap);
 
         if (!isAdmin) return body;
 
-        if (body && typeof body === 'object' && !Array.isArray(body)) {
-          return {
-            ...body,
-            __trace: {
-              requestId: ctx.requestId,
-              totalMs,
-              spans: ctx.spans,
-              artifacts: ctx.artifacts,
-            },
-          };
-        }
-        return {
-          data: body,
-          __trace: {
-            requestId: ctx.requestId,
-            totalMs,
-            spans: ctx.spans,
-            artifacts: ctx.artifacts,
-          },
+        const tracePayload = {
+          requestId: ctx.requestId,
+          totalMs: Date.now() - ctx.startedAt,
+          spans: ctx.spans,
+          artifacts: ctx.artifacts,
+          artifactsDropped: ctx.artifactsDropped,
         };
+
+        // Only merge __trace into plain JSON objects. Arrays / primitives /
+        // class instances pass through untouched — they're rare on
+        // brain:admin endpoints (all current admin returns are objects),
+        // and the requestId is also surfaced on /admin/traces so the
+        // waterfall is fetchable separately.
+        if (
+          body &&
+          typeof body === 'object' &&
+          !Array.isArray(body) &&
+          Object.getPrototypeOf(body) === Object.prototype
+        ) {
+          return { ...body, __trace: tracePayload };
+        }
+        return body;
       }),
     );
   }

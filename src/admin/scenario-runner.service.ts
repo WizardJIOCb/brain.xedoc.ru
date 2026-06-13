@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { IngestService } from '../ingest/ingest.service';
 import { FactsService } from '../facts/facts.service';
 import { EntitiesService } from '../entities/entities.service';
@@ -43,6 +44,8 @@ export interface ScenarioQueryResult {
     externalRefs: Record<string, string>;
   }>;
   passed: boolean;
+  /** Set when the search call itself threw — diagnostic context for passed:false. */
+  error?: string;
 }
 
 export interface ScenarioRunOutcome {
@@ -70,13 +73,15 @@ export interface ScenarioRunOutcome {
 }
 
 export interface ScenarioRunOptions {
-  isolateTenant?: boolean;
+  /**
+   * If true, the ephemeral `eval_*` tenant database is kept after the run
+   * (debug aid). Default false — runs always create+drop an isolated tenant
+   * so a destructive setup step (retract/forget) can never mutate a live
+   * tenant. There is no escape hatch to target an arbitrary companyId by
+   * design.
+   */
   keepTenant?: boolean;
-  /** Caller's companyId — used as the tenant when isolateTenant=false. */
-  defaultCompanyId: string;
 }
-
-const FALLBACK_SOURCE = (vertical: string) => ({ vertical });
 
 @Injectable()
 export class ScenarioRunnerService {
@@ -109,13 +114,12 @@ export class ScenarioRunnerService {
     return s;
   }
 
-  async runOne(id: string, opts: ScenarioRunOptions): Promise<ScenarioRunOutcome> {
+  async runOne(id: string, opts: ScenarioRunOptions = {}): Promise<ScenarioRunOutcome> {
     const scenario = this.getById(id);
     const startedAt = Date.now();
-    const isolate = opts.isolateTenant !== false;
-    const companyId = isolate
-      ? `eval_${slugify(id)}_${Date.now().toString(36)}`
-      : opts.defaultCompanyId;
+    // Ephemeral tenant id — randomUUID slice so two concurrent runs of the
+    // same scenario don't collide on a ms timestamp and drop each other's DB.
+    const companyId = `eval_${slugify(id)}_${randomUUID().slice(0, 8)}`;
 
     const setupSummary: ScenarioRunOutcome['setupSummary'] = {
       facts: 0,
@@ -127,62 +131,66 @@ export class ScenarioRunnerService {
     };
     const factIdsByTag = new Map<string, string>();
 
-    for (let i = 0; i < scenario.setup.length; i++) {
-      const step = scenario.setup[i];
-      try {
-        await this.applyStep(companyId, step, setupSummary, factIdsByTag);
-      } catch (e) {
-        setupSummary.errors.push({
-          step: i,
-          kind: step.kind,
-          error: (e as Error).message,
-        });
+    try {
+      for (let i = 0; i < scenario.setup.length; i++) {
+        const step = scenario.setup[i];
+        try {
+          await this.applyStep(companyId, step, setupSummary, factIdsByTag);
+        } catch (e) {
+          setupSummary.errors.push({
+            step: i,
+            kind: step.kind,
+            error: (e as Error).message,
+          });
+        }
+      }
+
+      const queryResults: ScenarioQueryResult[] = [];
+      for (const q of scenario.queries) {
+        queryResults.push(await this.runQuery(companyId, q));
+      }
+
+      const passes = queryResults.filter((q) => q.passed).length;
+      const passedAll =
+        setupSummary.errors.length === 0 && passes === queryResults.length;
+
+      return {
+        scenarioId: scenario.id,
+        vertical: scenario.vertical,
+        companyId,
+        startedAt: new Date(startedAt).toISOString(),
+        durationMs: Date.now() - startedAt,
+        passed: passedAll,
+        setupSummary,
+        queryResults,
+        metrics: {
+          recallAt1: queryResults.length
+            ? queryResults.filter((q) => q.rankOfExpected === 1).length /
+              queryResults.length
+            : 0,
+          recallAt5: queryResults.length
+            ? queryResults.filter(
+                (q) => q.rankOfExpected > 0 && q.rankOfExpected <= 5,
+              ).length / queryResults.length
+            : 0,
+          queries: queryResults.length,
+          passes,
+        },
+      };
+    } finally {
+      // Always drop the ephemeral DB unless the operator explicitly asked
+      // to keep it for post-mortem. A run that throws mid-flight would
+      // otherwise leak its `co_eval_*` database forever.
+      if (!opts.keepTenant) {
+        try {
+          await this.surreal.dropCompanyDatabase(companyId);
+        } catch (e) {
+          this.logger.warn(
+            `Could not drop ephemeral tenant ${companyId}: ${(e as Error).message}`,
+          );
+        }
       }
     }
-
-    const queryResults: ScenarioQueryResult[] = [];
-    for (const q of scenario.queries) {
-      queryResults.push(await this.runQuery(companyId, q));
-    }
-
-    const passes = queryResults.filter((q) => q.passed).length;
-    const passedAll =
-      setupSummary.errors.length === 0 && passes === queryResults.length;
-
-    const outcome: ScenarioRunOutcome = {
-      scenarioId: scenario.id,
-      vertical: scenario.vertical,
-      companyId,
-      startedAt: new Date(startedAt).toISOString(),
-      durationMs: Date.now() - startedAt,
-      passed: passedAll,
-      setupSummary,
-      queryResults,
-      metrics: {
-        recallAt1: queryResults.length
-          ? queryResults.filter((q) => q.rankOfExpected === 1).length /
-            queryResults.length
-          : 0,
-        recallAt5: queryResults.length
-          ? queryResults.filter(
-              (q) => q.rankOfExpected > 0 && q.rankOfExpected <= 5,
-            ).length / queryResults.length
-          : 0,
-        queries: queryResults.length,
-        passes,
-      },
-    };
-
-    if (isolate && !opts.keepTenant) {
-      try {
-        await this.surreal.dropCompanyDatabase(companyId);
-      } catch (e) {
-        this.logger.warn(
-          `Could not drop ephemeral tenant ${companyId}: ${(e as Error).message}`,
-        );
-      }
-    }
-    return outcome;
   }
 
   async cleanupEphemeralTenants(): Promise<string[]> {
@@ -374,6 +382,7 @@ export class ScenarioRunnerService {
         externalRefs: h.externalRefs ?? {},
       })),
       passed,
+      ...(error ? { error } : {}),
     };
   }
 }

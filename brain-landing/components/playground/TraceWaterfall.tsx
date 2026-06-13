@@ -49,6 +49,21 @@ function buildTree(spans: DebugSpan[]): TreeNode[] {
 }
 
 export function TraceWaterfall({ trace }: Props) {
+  // Hooks MUST run unconditionally — keep them above any early return.
+  // Empty-trace fallbacks below operate on the safe defaults.
+  const spans = trace?.spans ?? []
+  const artifacts = trace?.artifacts ?? []
+  const tree = useMemo(() => buildTree(spans), [spans])
+  const artifactsBySpan = useMemo(() => {
+    const m = new Map<string, DebugArtifact[]>()
+    for (const a of artifacts) {
+      const key = a.spanId ?? '__top'
+      if (!m.has(key)) m.set(key, [])
+      m.get(key)!.push(a)
+    }
+    return m
+  }, [artifacts])
+
   if (!trace) {
     return (
       <div className="text-xs text-[var(--text-faint)] italic px-2 py-3">
@@ -56,19 +71,9 @@ export function TraceWaterfall({ trace }: Props) {
       </div>
     )
   }
-  const tree = useMemo(() => buildTree(trace.spans), [trace.spans])
-  const artifactsBySpan = useMemo(() => {
-    const m = new Map<string, DebugArtifact[]>()
-    for (const a of trace.artifacts) {
-      const key = a.spanId ?? '__top'
-      if (!m.has(key)) m.set(key, [])
-      m.get(key)!.push(a)
-    }
-    return m
-  }, [trace.artifacts])
 
-  const baseStart = trace.spans.length
-    ? Math.min(...trace.spans.map((s) => s.startedAt))
+  const baseStart = spans.length
+    ? Math.min(...spans.map((s) => s.startedAt))
     : 0
 
   return (

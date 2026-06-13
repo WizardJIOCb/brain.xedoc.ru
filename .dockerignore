@@ -1,0 +1,56 @@
+# Build context exclusions — keeps `docker build` upload small and the
+# build cache stable. Anything explicitly COPYed by the Dockerfile is
+# still pulled in regardless of this list.
+
+# Dependencies — reinstalled in the image
+node_modules
+**/node_modules
+
+# Build output — rebuilt in the image
+dist
+**/dist
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Tooling / IDE
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Planning + local notes
+.planning
+CLAUDE.md
+**/CLAUDE.md
+
+# Frontend lives in its own Dockerfile (brain-landing/Dockerfile)
+brain-landing
+
+# Tests we don't ship — the Dockerfile selectively COPYs only
+# test/eval/{types.ts,scenarios,fixtures}, but excluding the rest of
+# test/ shrinks the upload to the self-hosted runner.
+test/spawn
+test/sdk
+test/mcp
+test/quality.real-e2e-spec.ts
+test/brain.real-e2e-spec.ts
+test/jest-*.json
+test/openai-key.txt
+
+# Local env files — never bake secrets into the image
+.env
+.env.local
+.env.*.local
+
+# Tarballs / docs / logs
+*.log
+*.tgz
+*.zip
+docs
+
+# Skills bundle — published separately
+skills
+skill-bundles

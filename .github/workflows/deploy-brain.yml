@@ -3,10 +3,13 @@ name: Deploy brain.inite.ai
 on:
   push:
     branches: [main]
+    # `test/**` is intentionally not in the ignore list — `test/eval/scenarios`
+    # and `test/eval/fixtures` ship inside the prod image (admin scenario
+    # runner reads them at runtime), so a scenario-only change must trigger
+    # a deploy. Use explicit `paths` if a narrower trigger is ever needed.
     paths-ignore:
       - 'docs/**'
       - '*.md'
-      - 'test/**'
       - '.planning/**'
   workflow_dispatch:
     inputs:
@@ -175,6 +178,13 @@ jobs:
                 - SEARCH_STAGE_BUDGET_RERANK_MS=4000
                 - SEARCH_STAGE_BUDGET_CROSS_ENCODER_MS=2000
                 - SEARCH_STAGE_BUDGET_BACKFILL_MS=2000
+                # Eval baselines — persisted to a host bind-mount so they
+                # survive container recreate (compose pull + up = new
+                # container; an in-image var/ would evaporate on every
+                # deploy and the diff feature would silently lose history).
+                - BRAIN_BASELINES_DIR=/var/brain/baselines
+              volumes:
+                - /opt/projects/${{ env.PROJECT_NAME }}/baselines:/var/brain/baselines
               labels:
                 # ── Backend routes only — landing handles the rest of brain.inite.ai.
                 # Backend owns /v1/*, /mcp/*, /health, /metrics, /openapi.json.
@@ -210,6 +220,13 @@ jobs:
             traefik-global:
               external: true
           EOF
+
+          # Bind-mount target must exist and be writable by the container's
+          # node user (uid 1000 on node:alpine). Without this docker creates
+          # it root-owned and the BaselineService fs.writeFile fails with
+          # EACCES on first save.
+          mkdir -p /opt/projects/${{ env.PROJECT_NAME }}/baselines
+          chown -R 1000:1000 /opt/projects/${{ env.PROJECT_NAME }}/baselines || true
 
           if [ "${{ github.event.inputs.action }}" = "restart" ]; then
             echo "[deploy] restart only"

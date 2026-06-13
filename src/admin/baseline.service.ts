@@ -61,7 +61,7 @@ export class BaselineService {
         this.logger.warn(`Skipping baseline ${file}: ${(e as Error).message}`);
       }
     }
-    return out.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+    return out.sort((a, b) => (b.savedAt ?? '').localeCompare(a.savedAt ?? ''));
   }
 
   async save(name: string, outcomes: ScenarioRunOutcome[]): Promise<BaselineEntry> {
