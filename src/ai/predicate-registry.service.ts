@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { SurrealService } from '../db/surreal.service';
 import { EmbedderService } from './embedder.service';
+import { cosineSimilarity } from '../common/vector-math';
 
 /**
  * Per-tenant predicate ontology registry.
@@ -1075,20 +1076,6 @@ function embeddingTextFor(p: PredicateDefinition): string {
   // taste..." matches "hobby: enjoys photography" much better than the
   // bare id "preference" alone.
   return `${p.predicateId.replace(/_/g, ' ')}: ${p.description}`;
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  const denom = Math.sqrt(na) * Math.sqrt(nb);
-  return denom === 0 ? 0 : dot / denom;
 }
 
 function computeHash(rows: PredicateDefinition[]): string {

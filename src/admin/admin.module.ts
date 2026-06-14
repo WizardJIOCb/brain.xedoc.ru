@@ -10,6 +10,9 @@ import { AdminService } from './admin.service';
 import { ScenarioRunnerService } from './scenario-runner.service';
 import { BaselineService } from './baseline.service';
 import { ChatRouterService } from './chat-router.service';
+import { ChatRouterCacheService } from './chat-router-cache.service';
+import { CollapsePatternService } from './collapse-pattern.service';
+import { IntentClassifierService } from './intent-classifier.service';
 
 @Module({
   imports: [
@@ -25,6 +28,9 @@ import { ChatRouterService } from './chat-router.service';
     AdminService,
     ScenarioRunnerService,
     BaselineService,
+    ChatRouterCacheService,
+    CollapsePatternService,
+    IntentClassifierService,
     ChatRouterService,
   ],
 })

@@ -1,0 +1,21 @@
+/**
+ * Cosine similarity over equal-length numeric vectors.
+ *
+ * Returns 0 when either vector has zero magnitude or the lengths differ.
+ * Mismatched lengths use the shorter — defensive against partial reads
+ * from the DB where a row may carry a truncated embedding.
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length === 0 || b.length === 0) return 0;
+  const len = Math.min(a.length, b.length);
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < len; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom === 0 ? 0 : dot / denom;
+}

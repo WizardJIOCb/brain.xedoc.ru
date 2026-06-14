@@ -18,6 +18,7 @@ import { IngestMentionDto } from './dto/ingest-mention.dto';
 import { IngestLinkDto } from './dto/ingest-link.dto';
 import { ConflictConfig, SOURCE_TRUST } from './conflict-resolver';
 import { traceSpan, traceArtifact } from '../common/debug-trace';
+import { cosineSimilarity as cosine } from '../common/vector-math';
 
 export type IngestOutcome =
   | 'INSERTED'
@@ -638,16 +639,4 @@ function redactPii(text: string): string {
     .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[EMAIL]')
     .replace(/\+?\d[\d\s().-]{7,}\d/g, '[PHONE]')
     .replace(/\b\d{9,}\b/g, '[NUM]');
-}
-
-function cosine(a: number[], b: number[]): number {
-  let dot = 0, na = 0, nb = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  const denom = Math.sqrt(na) * Math.sqrt(nb);
-  return denom === 0 ? 0 : dot / denom;
 }

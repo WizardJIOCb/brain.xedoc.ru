@@ -3,7 +3,18 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import * as chrono from 'chrono-node';
 import { traceArtifact, traceSpan } from '../common/debug-trace';
-import { PredicateRegistryService } from '../ai/predicate-registry.service';
+import {
+  PredicateRegistryService,
+  type PredicateSnapshot,
+} from '../ai/predicate-registry.service';
+import { EmbedderService } from '../ai/embedder.service';
+import { cosineSimilarity } from '../common/vector-math';
+import { ChatRouterCacheService } from './chat-router-cache.service';
+import {
+  CollapsePatternService,
+  extractCollapseEditsLocally,
+} from './collapse-pattern.service';
+import { IntentClassifierService } from './intent-classifier.service';
 
 /**
  * Grounded chat router for the brain demo.
@@ -137,10 +148,17 @@ export class ChatRouterService {
   private readonly logger = new Logger(ChatRouterService.name);
   private readonly openai: OpenAI;
   private readonly model: string;
+  private readonly hintSimilarityThreshold: number;
+  private readonly hintMaxCount: number;
+  private readonly intentConfidenceFloor: number;
 
   constructor(
     private readonly config: ConfigService,
     private readonly registry: PredicateRegistryService,
+    private readonly routeCache: ChatRouterCacheService,
+    private readonly embedder: EmbedderService,
+    private readonly collapsePatterns: CollapsePatternService,
+    private readonly intentClassifier: IntentClassifierService,
   ) {
     this.openai = new OpenAI({
       apiKey: this.config.getOrThrow<string>('OPENAI_API_KEY'),
@@ -148,6 +166,16 @@ export class ChatRouterService {
       maxRetries: 1,
     });
     this.model = this.config.get<string>('OPENAI_CHAT_MODEL', 'gpt-4o-mini');
+    this.hintSimilarityThreshold = parseFloat(
+      this.config.get<string>('CHAT_ROUTE_HINT_SIMILARITY', '0.4'),
+    );
+    this.hintMaxCount = parseInt(
+      this.config.get<string>('CHAT_ROUTE_HINT_MAX', '3'),
+      10,
+    );
+    this.intentConfidenceFloor = parseFloat(
+      this.config.get<string>('CHAT_ROUTE_INTENT_CONFIDENCE_FLOOR', '0.85'),
+    );
   }
 
   async route(
@@ -159,9 +187,7 @@ export class ChatRouterService {
     // Per-tenant predicate vocab for the LLM-side enum constraint.
     // Defensive: registry failure degrades to permissive — the strict-mode
     // enum drops to free string in that case (handled below).
-    let snapshot:
-      | { versionHash: string; active: { predicateId: string }[] }
-      | null = null;
+    let snapshot: PredicateSnapshot | null = null;
     try {
       snapshot = await this.registry.getSnapshot(options.companyId);
     } catch (e) {
@@ -188,11 +214,151 @@ export class ChatRouterService {
       knownNamesCount: knownNames.length,
     });
 
+    // Exact-key route cache. Hit replays a prior validated ChatRoute whose
+    // spans are anchored to a byte-identical message (NFC is part of the
+    // key), so spans remain valid without re-validation. nowDayBucket
+    // only enters the key when the message carries a temporal anchor —
+    // queries without "yesterday"/"next month" don't depend on `now`.
+    const cacheKey = this.routeCache.computeKey({
+      companyId: options.companyId,
+      message,
+      knownNames,
+      predicateVocab,
+      hasTemporal: localTemporal !== null,
+      now: refDate,
+    });
+    const cached = this.routeCache.get(cacheKey);
+    if (cached) {
+      traceArtifact('demo.chat.cache_decision', {
+        hit: true,
+        key: cacheKey,
+        hasTemporal: localTemporal !== null,
+      });
+      return cached;
+    }
+    traceArtifact('demo.chat.cache_decision', {
+      hit: false,
+      key: cacheKey,
+      hasTemporal: localTemporal !== null,
+    });
+
+    // Embedding-based predicate-hint pre-pass. The registry's per-predicate
+    // embeddings (already stored at bootstrap for EDC canonicalisation —
+    // see migration 0012) are reused here: cosine(query, predicate.embedding)
+    // ≥ threshold → emit a hint. Multilingual for free (embedder handles
+    // RU + EN). No hardcoded phrase tables — the only knobs are similarity
+    // threshold and top-N cap. ~50ms cache-miss cost; cache hits skip
+    // this entirely.
+    const localHints = await extractPredicateHintsLocally(
+      message,
+      snapshot,
+      this.embedder,
+      this.hintSimilarityThreshold,
+      this.hintMaxCount,
+    );
+    traceArtifact('demo.chat.local_hints', {
+      hints: localHints,
+      threshold: this.hintSimilarityThreshold,
+      poolSize: snapshot?.embeddings.size ?? 0,
+    });
+
+    // Learned collapse-pattern lookup. The per-tenant cache starts empty
+    // and fills as the LLM emits collapse_state_change edits — first
+    // observation pays the LLM round-trip; subsequent identical phrases
+    // are derived locally. Sub-ms substring scan. Skipped on cache hit.
+    let collapseSnapshot: { patterns: Map<string, { pattern: string; replacement: string }> } | null = null;
+    let localCollapses: ReturnType<typeof extractCollapseEditsLocally> = [];
+    try {
+      collapseSnapshot = await this.collapsePatterns.getSnapshot(
+        options.companyId,
+      );
+      localCollapses = extractCollapseEditsLocally(message, collapseSnapshot);
+    } catch (e) {
+      this.logger.warn(
+        `collapse-pattern snapshot failed for ${options.companyId}: ${(e as Error).message}; LLM-only collapse`,
+      );
+    }
+    traceArtifact('demo.chat.local_collapses', {
+      hits: localCollapses,
+      poolSize: collapseSnapshot?.patterns.size ?? 0,
+    });
+
+    // Intent classification — multilingual zero-shot NLI when the
+    // model is warm, punctuation fallback otherwise. Runs only on cache
+    // miss; cache hits skip the inference cost.
+    const localIntent = await this.intentClassifier.classify(message);
+    traceArtifact('demo.chat.local_intent', {
+      intent: localIntent.intent,
+      confidence: localIntent.confidence,
+      source: localIntent.source,
+    });
+
     const system = buildSystemPrompt(predicateVocab, knownNames);
     const user = `now: ${nowIso}
 message: ${message}`;
 
+    const skipDecision = shouldSkipLLM({
+      intent: localIntent.intent,
+      intentConfidence: localIntent.confidence,
+      localMentions,
+      localHints,
+      localCollapses,
+      intentConfidenceFloor: this.intentConfidenceFloor,
+    });
+
     return traceSpan('demo.chat.route', async () => {
+      traceArtifact('demo.chat.skip_decision', {
+        ...skipDecision,
+        intent: localIntent.intent,
+        intentConfidence: localIntent.confidence,
+        intentSource: localIntent.source,
+        intentConfidenceFloor: this.intentConfidenceFloor,
+      });
+
+      if (skipDecision.skip) {
+        // Build the same RawRouteOutput shape the LLM would have produced,
+        // entirely from locals. validateAndAssemble runs unchanged — it
+        // can't distinguish synthesised from LLM-emitted output once it's
+        // in this shape, so every grounding rule still fires.
+        const synthetic: RawRouteOutput = {
+          intent: localIntent.intent,
+          mentions: localMentions.map((m) => ({
+            canonical: m.canonical,
+            nameSpan: m.span,
+          })),
+          predicateHints:
+            localIntent.intent === 'ask'
+              ? localHints.map((h) => ({
+                  predicateId: h.predicateId,
+                  triggerSpan: h.triggerSpan,
+                }))
+              : [],
+          edits: localCollapses.map((c) => ({
+            op: 'collapse_state_change' as const,
+            sourceSpan: c.span,
+            canonical: null,
+            replacement: c.replacement,
+          })),
+          asOf:
+            localIntent.intent === 'ask' && localTemporal
+              ? { iso: localTemporal.iso, anchorSpan: localTemporal.span }
+              : null,
+          validFrom:
+            localIntent.intent === 'tell' && localTemporal
+              ? { iso: localTemporal.iso, anchorSpan: localTemporal.span }
+              : null,
+          reason: `local-skip (${skipDecision.reason})`,
+        };
+        const route = this.validateAndAssemble(
+          message,
+          synthetic,
+          new Set(predicateVocab),
+          new Set(knownNames),
+        );
+        this.routeCache.set(cacheKey, route);
+        return route;
+      }
+
       traceArtifact('demo.chat.prompt', {
         system,
         user,
@@ -259,12 +425,68 @@ message: ${message}`;
           anchorSpan: localTemporal.span,
         };
       }
-      return this.validateAndAssemble(
+      // Predicate hints — union of local (embedding-based) + LLM, deduped
+      // by predicateId with local span winning. Augment (not replace)
+      // because the embedding pass is not exhaustive against the registry:
+      // a paraphrase the embedding misses might still register with the
+      // LLM and vice-versa. Only relevant on ASK; on TELL the slot is
+      // empty by validation rule.
+      if (parsed.intent === 'ask' && localHints.length > 0) {
+        const llmHints = parsed.predicateHints ?? [];
+        const localIds = new Set(localHints.map((h) => h.predicateId));
+        merged.predicateHints = [
+          ...localHints.map((h) => ({
+            predicateId: h.predicateId,
+            triggerSpan: h.triggerSpan,
+          })),
+          ...llmHints.filter((h) => !localIds.has(h.predicateId)),
+        ];
+      }
+      // Inject local collapse edits into the LLM-emitted edits before
+      // validation. validateAndAssemble's overlap-dedup handles any
+      // double-emission (local cache hit + LLM re-emit on same phrase).
+      if (localCollapses.length > 0) {
+        merged.edits = [
+          ...localCollapses.map((c) => ({
+            op: 'collapse_state_change' as const,
+            sourceSpan: c.span,
+            canonical: null,
+            replacement: c.replacement,
+          })),
+          ...(parsed.edits ?? []),
+        ];
+      }
+      const route = this.validateAndAssemble(
         message,
         merged,
         new Set(predicateVocab),
         new Set(knownNames),
       );
+      this.routeCache.set(cacheKey, route);
+
+      // Fire-and-forget: teach the cache patterns the LLM emitted that
+      // we didn't already know. Failure here doesn't affect routing —
+      // the cache will just stay cold for those phrases.
+      const knownLower = new Set(collapseSnapshot?.patterns.keys() ?? []);
+      const newPairs: Array<{ pattern: string; replacement: string }> = [];
+      for (const e of parsed.edits ?? []) {
+        if (e.op !== 'collapse_state_change') continue;
+        const span = validateSpan(message, nfc(message), e.sourceSpan);
+        if (!span || !e.replacement) continue;
+        const pattern = span.text;
+        if (knownLower.has(pattern.toLowerCase())) continue;
+        newPairs.push({ pattern, replacement: e.replacement });
+      }
+      if (newPairs.length > 0) {
+        void this.collapsePatterns
+          .record(options.companyId, newPairs)
+          .catch((e) =>
+            this.logger.warn(
+              `collapse-pattern record failed for ${options.companyId}: ${(e as Error).message}`,
+            ),
+          );
+      }
+      return route;
     });
   }
 
@@ -378,11 +600,21 @@ message: ${message}`;
       }
     }
 
-    // 4. Edits — each edit's sourceSpan must ground; canonicalize edits
-    //    must have canonical ∈ knownNames. Edits whose sourceSpan overlaps
-    //    another accepted edit are dropped (right-to-left application
-    //    can't handle overlapping ranges cleanly).
-    const candidateEdits: Array<{ edit: EditOp; span: Span }> = [];
+    // 4. Edits — synthesise canonicalize_mention 1:1 from accepted
+    //    mentions, then validate LLM-emitted collapse_state_change
+    //    edits (sourceSpan must ground). Edits whose sourceSpan
+    //    overlaps another accepted edit are dropped right-to-left so
+    //    splicing remains coherent.
+    const candidateEdits: Array<{ edit: EditOp; span: Span }> = mentions.map(
+      (m) => ({
+        edit: {
+          op: 'canonicalize_mention' as const,
+          sourceSpan: m.span,
+          canonical: m.canonical,
+        },
+        span: m.span,
+      }),
+    );
     for (const e of parsed.edits ?? []) {
       const span = validateSpan(message, normalizedInput, e.sourceSpan);
       if (!span) {
@@ -393,15 +625,17 @@ message: ${message}`;
         });
         continue;
       }
-      if (e.op === 'canonicalize_mention') {
-        if (!knownNames.has(e.canonical)) {
-          report.droppedEdits.push({
-            op: e.op,
-            reason: 'canonical_not_in_known_names',
-            span,
-          });
-          continue;
-        }
+      // Defensive: LLM schema only enumerates collapse_state_change.
+      // Anything else (a non-strict deployment leaking
+      // canonicalize_mention or strip_temporal) is dropped; both ops
+      // are already server-synthesised.
+      if (e.op !== 'collapse_state_change') {
+        report.droppedEdits.push({
+          op: e.op,
+          reason: 'llm_emit_disabled',
+          span,
+        });
+        continue;
       }
       candidateEdits.push({ edit: { ...e, sourceSpan: span }, span });
     }
@@ -540,11 +774,11 @@ OUTPUT CONTRACT (strict JSON schema enforces shape):
   edits[]: structured edit operations that the SERVER applies to the input
     message to produce the rewritten form. The model NEVER emits the rewritten
     string itself — only the edit ops.
-      canonicalize_mention: replace a short reference with its canonical name.
-        sourceSpan = short reference; canonical = canonical name.
-        Example: input "Maria switched to keto" → edit
-          { op: "canonicalize_mention", sourceSpan: { text: "Maria", start: 0, end: 5 },
-            canonical: "Maria Petrov" }
+
+    The server SYNTHESISES canonicalize_mention (1:1 from accepted mentions)
+    and strip_temporal (1:1 from grounded temporal anchors) — do NOT emit
+    them. Emit only:
+
       collapse_state_change: replace a change-of-state verb phrase with the
         present-tense resulting-state form. TENSE-AGNOSTIC — covers past,
         present, future.
@@ -552,10 +786,6 @@ OUTPUT CONTRACT (strict JSON schema enforces shape):
                   "moves to Dublin"  → replacement "lives in Dublin"
                   "joined as CTO"    → replacement "is the CTO"
                   "moved from Berlin"→ replacement "lives in Berlin"
-      strip_temporal: remove a temporal anchor phrase (always paired with an
-        asOf/validFrom emission so the timestamp is captured separately).
-        sourceSpan = the phrase ("next month", "last week", "в марте",
-        "since February").
 
     Apply edits ONLY when they are warranted by the input. Do not invent
     edits to make the message "cleaner" — every edit must point at a real
@@ -633,13 +863,13 @@ function buildSchema(predicateVocab: string[]): Record<string, unknown> {
           type: 'object',
           additionalProperties: false,
           properties: {
+            // canonicalize_mention is server-synthesised 1:1 from
+            // accepted mentions[]. strip_temporal is server-derived from
+            // grounded asOf/validFrom anchors. LLM only owns
+            // collapse_state_change.
             op: {
               type: 'string',
-              enum: [
-                'canonicalize_mention',
-                'collapse_state_change',
-                'strip_temporal',
-              ],
+              enum: ['collapse_state_change'],
             },
             sourceSpan: spanSchema,
             canonical: { type: ['string', 'null'] },
@@ -931,6 +1161,151 @@ function extractMentionsLocally(
     }
   }
   return accepted;
+}
+
+/**
+ * Embedding-based predicate-hint extraction.
+ *
+ * Compares the user message embedding against the per-predicate
+ * embeddings already stored by the registry (each predicate is embedded
+ * at bootstrap as part of the EDC pipeline — see migration 0012). Emits
+ * a hint for every predicate whose cosine similarity ≥ threshold, capped
+ * at maxHints, ranked by similarity descending.
+ *
+ * triggerSpan covers the whole message — the embedding aggregates over
+ * all tokens, so there is no localized phrase to anchor. The trace
+ * artifact carries the similarity score so an operator can see what
+ * earned the hint and tune the threshold.
+ *
+ * Cost: ~50ms per cache miss (one OpenAI embedding round-trip; the
+ * embedder's LRU cache absorbs repeated identical queries). Skipped
+ * entirely on cache hit because this runs AFTER the cache check.
+ *
+ * Failure modes degrade silently to empty hints — the LLM still produces
+ * its own hints and the validation pipeline handles missing slots.
+ */
+export async function extractPredicateHintsLocally(
+  message: string,
+  snapshot: PredicateSnapshot | null,
+  embedder: EmbedderService,
+  threshold: number,
+  maxHints: number,
+): Promise<
+  Array<{
+    predicateId: string;
+    similarity: number;
+    triggerSpan: Span;
+  }>
+> {
+  if (!snapshot || snapshot.embeddings.size === 0) return [];
+  if (message.length === 0) return [];
+  let queryVec: number[];
+  try {
+    queryVec = await embedder.embed(message);
+  } catch {
+    return [];
+  }
+  const scored: Array<{ predicateId: string; similarity: number }> = [];
+  for (const [predicateId, predEmb] of snapshot.embeddings) {
+    const sim = cosineSimilarity(queryVec, predEmb);
+    if (sim >= threshold) {
+      scored.push({ predicateId, similarity: sim });
+    }
+  }
+  scored.sort((a, b) => b.similarity - a.similarity);
+  const span: Span = { text: message, start: 0, end: message.length };
+  return scored.slice(0, maxHints).map(({ predicateId, similarity }) => ({
+    predicateId,
+    similarity,
+    triggerSpan: span,
+  }));
+}
+
+/**
+ * Local intent classifier — punctuation-only.
+ *
+ * The only signal is the universal interrogative mark `?`. No
+ * enumerated lexicon of wh-pronouns, no list of imperative-search
+ * phrases — those are surface-form catalogues that rot per language
+ * and read as magic in code.
+ *
+ * Confidence levels feed the LLM-skip gate:
+ *   trailing `?`  → ask, 0.95 (unambiguous interrogative mark)
+ *   otherwise     → tell, 0.70 (declarative default; below the skip
+ *                              floor unless a tenant explicitly lowers
+ *                              CHAT_ROUTE_INTENT_CONFIDENCE_FLOOR)
+ *   empty         → tell, 0    (never skip)
+ *
+ * Trade-off: a wh-question typed without `?` ("where Maria lives")
+ * defaults to tell-fallback and the LLM runs. That is the LLM's job —
+ * it is the safety net for everything heuristics cannot decide.
+ * Aggressive multilingual intent classification (zero-shot NLI via
+ * @xenova/transformers) is the upgrade path when warm-start cost is
+ * acceptable; deferred until it materially shifts the skip rate.
+ */
+export function classifyIntentLocally(message: string): {
+  intent: 'ask' | 'tell';
+  confidence: number;
+} {
+  if (message.trim().length === 0) {
+    return { intent: 'tell', confidence: 0 };
+  }
+  if (/\?\s*$/.test(message)) {
+    return { intent: 'ask', confidence: 0.95 };
+  }
+  return { intent: 'tell', confidence: 0.7 };
+}
+
+/**
+ * Confidence-gated decision: can we serve this route entirely from
+ * local pre-pass and skip the LLM call?
+ *
+ * Conservative gates: each check must pass or we fall through to the
+ * LLM (the LLM is the safety net for everything heuristics can't cover).
+ *   - intent confidence ≥ 0.85
+ *   - at least one mention resolved (otherwise the route lacks subject)
+ *   - ASK: at least one predicate hint emitted (otherwise we'd guess
+ *     what the question targets)
+ *   - TELL: at least one cached collapse edit fired (otherwise we'd
+ *     risk shipping a tell with a state-change verb left raw —
+ *     downstream extraction reads it as past-tense, missing the
+ *     present-state fact). Simple tells with no state-change pass
+ *     through the route cache on second occurrence anyway, so the
+ *     cost of LLM-on-first-occurrence is bounded.
+ *
+ * Temporal slot does not gate: if a message has a temporal cue
+ * chrono can parse, localTemporal is set and the synthesis includes
+ * it; if chrono parses nothing, we treat the message as anchor-less
+ * (matches "no asOf default" rule in the system prompt).
+ */
+export function shouldSkipLLM(input: {
+  intent: 'ask' | 'tell';
+  intentConfidence: number;
+  localMentions: Array<{ canonical: string; span: Span }>;
+  localHints: Array<{ predicateId: string; similarity: number; triggerSpan: Span }>;
+  localCollapses: Array<{
+    pattern: string;
+    replacement: string;
+    span: { text: string; start: number; end: number };
+  }>;
+  intentConfidenceFloor: number;
+}): { skip: boolean; reason: string } {
+  if (input.intentConfidence < input.intentConfidenceFloor) {
+    return { skip: false, reason: 'intent_confidence_low' };
+  }
+  if (input.localMentions.length === 0) {
+    return { skip: false, reason: 'no_mentions_resolved' };
+  }
+  if (input.intent === 'ask') {
+    if (input.localHints.length === 0) {
+      return { skip: false, reason: 'no_predicate_hints' };
+    }
+    return { skip: true, reason: 'all_local_ask' };
+  }
+  if (input.localCollapses.length === 0) {
+    return { skip: false, reason: 'tell_no_cached_collapses' };
+  }
+  return { skip: true, reason: 'all_local_tell' };
 }
 
 function isValidIso(s: string): boolean {
