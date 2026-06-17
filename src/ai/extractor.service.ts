@@ -8,6 +8,7 @@ import {
   CORE_PREDICATES,
   PredicateDefinition,
 } from './predicate-registry.service';
+import { LocalPredicateSelectorService } from './local-predicate-selector.service';
 
 /**
  * Closed-vocabulary, span-grounded entity-and-fact extractor.
@@ -230,6 +231,7 @@ export class ExtractorService {
   constructor(
     private readonly configService: ConfigService,
     private readonly registry: PredicateRegistryService,
+    private readonly localPredicates: LocalPredicateSelectorService,
   ) {
     const timeoutMs = parseInt(
       this.configService.get<string>('OPENAI_TIMEOUT_MS', '30000'),
@@ -595,6 +597,63 @@ export class ExtractorService {
     }
     if (droppedEdges.length > 0) {
       traceArtifact('extractor.invalid_edges', { dropped: droppedEdges });
+    }
+
+    // Local predicate selection — embed each clause and pick the
+    // canonical predicate with highest cosine similarity vs the
+    // registry's per-predicate description embeddings (already cached
+    // from bootstrap, migration 0012). This catches the dominant
+    // failure mode of the downstream canonicalize() pass: short coined
+    // names like "job_title" rarely hit cosine 0.85 against verbose
+    // predicate cards like the `status` description, but the CLAUSE
+    // "Maria is our new CTO at Acme" scores much higher because both
+    // share role-shaped vocabulary.
+    //
+    // Override the LLM-coined predicate ONLY when local top-1 is above
+    // EXTRACTOR_LOCAL_PREDICATE_THRESHOLD (default 0.45 — tuned for
+    // text-embedding-3-small on CORE cards). Below threshold, the
+    // LLM-coined predicate flows through to canonicalize() unchanged.
+    const localThreshold = parseFloat(
+      this.configService.get<string>(
+        'EXTRACTOR_LOCAL_PREDICATE_THRESHOLD',
+        '0.45',
+      ),
+    );
+    let snapshotForLocal:
+      | Awaited<ReturnType<PredicateRegistryService['getSnapshot']>>
+      | null = null;
+    try {
+      snapshotForLocal = snapshot as Awaited<
+        ReturnType<PredicateRegistryService['getSnapshot']>
+      >;
+    } catch {
+      snapshotForLocal = null;
+    }
+    const localOverrides: Array<{
+      original: string;
+      override: string;
+      similarity: number;
+      clauseIndex?: number;
+    }> = [];
+    for (const f of facts) {
+      if (!f.clause) continue;
+      const ranked = await this.localPredicates.rank(f.clause, snapshotForLocal, 3);
+      if (ranked.length === 0) continue;
+      const top = ranked[0];
+      if (top.similarity < localThreshold) continue;
+      if (top.predicateId === f.predicate) continue;
+      localOverrides.push({
+        original: f.predicate,
+        override: top.predicateId,
+        similarity: top.similarity,
+      });
+      f.predicate = top.predicateId;
+    }
+    if (localOverrides.length > 0) {
+      traceArtifact('extractor.local_predicate_override', {
+        threshold: localThreshold,
+        decisions: localOverrides,
+      });
     }
 
     // EDC canonicalization pass. For each fact, ask the registry to
