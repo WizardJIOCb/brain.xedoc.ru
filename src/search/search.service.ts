@@ -5,6 +5,7 @@ import { EmbedderService } from '../ai/embedder.service';
 import { RerankerService } from '../ai/reranker.service';
 import { PredicateRouterService } from '../ai/predicate-router.service';
 import { CrossEncoderService } from '../ai/cross-encoder.service';
+import { CalibrationService } from '../ai/calibration/calibration.service';
 import { SearchDto, SearchMode } from './dto/search.dto';
 import { MetricsService } from '../metrics/metrics.service';
 import { withSpan } from '../common/tracing';
@@ -71,6 +72,7 @@ export class SearchService {
     private readonly reranker: RerankerService,
     private readonly predicateRouter: PredicateRouterService,
     private readonly crossEncoder: CrossEncoderService,
+    private readonly calibration: CalibrationService,
     @Optional() private readonly metrics?: MetricsService,
   ) {
     this.budgets = resolveStageBudgets();
@@ -242,7 +244,11 @@ export class SearchService {
     const typeDist = routerOut?.types ?? null;
 
     // 4. Scoring + per-entity bucketing with diversity-aware degree boost.
-    const scored = scoreRows(filtered, predicateDist, Date.now());
+    //    `calibration` rewrites the raw confidence via the Phase 3
+    //    isotonic map before it folds into the final score.
+    const scored = scoreRows(filtered, predicateDist, Date.now(), {
+      calibrate: (raw: number) => this.calibration.calibrate(raw),
+    });
     const byEntity = bucketByEntity(scored);
 
     // 5. Edge expansion (default ON) — graph-walk from top seeds.

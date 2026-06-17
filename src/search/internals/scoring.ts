@@ -30,19 +30,32 @@ export interface PredicateDistribution {
 }
 
 /**
- * Decay × confidence × predicate-boost scoring for each fused row.
- * Pure — `now` is passed in so tests stay deterministic.
+ * Optional confidence calibrator — fits the Phase 3 isotonic-
+ * regression map at boot and rewrites every raw confidence on its way
+ * into the final score. Passed in to keep `scoreRows` pure / unit-
+ * testable. When `null`, raw confidence is used unchanged.
+ */
+export interface ConfidenceCalibrator {
+  calibrate(rawConfidence: number): number;
+}
+
+/**
+ * Decay × calibratedConfidence × predicate-boost scoring for each
+ * fused row. Pure — `now` and `calibrator` are passed in so tests
+ * stay deterministic.
  *
- *   score = fusedScore × exp(-ln2 × ageDays / halfLife) × confidence
- *           × (1 + α × predicateDist.weights[predicate])
+ *   score = fusedScore × exp(-ln2 × ageDays / halfLife)
+ *           × calibratedConfidence × (1 + α × predicateDist.weights[p])
  *
  * `predicateDist` null → boost reduces to 1.0. `policy.decayHalfLifeDays`
- * null → no decay (1.0).
+ * null → no decay (1.0). `calibrator` null → calibratedConfidence ===
+ * rawConfidence.
  */
 export function scoreRows(
   rows: FusedRow[],
   predicateDist: PredicateDistribution | null,
   now: number,
+  calibrator: ConfidenceCalibrator | null = null,
 ): ScoredRow[] {
   return rows.map((row) => {
     const policy = policyFor(row.predicate);
@@ -56,13 +69,17 @@ export function scoreRows(
     const predBoost = predicateDist
       ? 1 + alpha * (predicateDist.weights[row.predicate] ?? 0)
       : 1;
-    const finalScore = row.fusedScore * decay * row.confidence * predBoost;
+    const calibratedConfidence = calibrator
+      ? calibrator.calibrate(row.confidence)
+      : row.confidence;
+    const finalScore = row.fusedScore * decay * calibratedConfidence * predBoost;
     return {
       row,
       score: finalScore,
       breakdown: {
         fusedScore: row.fusedScore,
         confidence: row.confidence,
+        calibratedConfidence,
         decay,
         predBoost,
         finalScore,

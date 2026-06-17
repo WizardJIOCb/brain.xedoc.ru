@@ -59,13 +59,26 @@ export type FusedRow = FactRow & { fusedScore: number };
 /**
  * Per-fact score breakdown — every multiplicative component is kept
  * separate so the DecisionLog can show why this fact beat the others.
- * Phase 1 surfaces `decay`, `confidence`, `predBoost` and `finalScore`
- * directly; Phase 3 will replace `confidence` with `calibratedConfidence`
- * without changing this shape.
+ *
+ *  Phase 1 fields: fusedScore, confidence, decay, predBoost, finalScore,
+ *                  stages.
+ *  Phase 3 additions: calibratedConfidence (isotonic-mapped raw),
+ *                  extractionEntropy (semantic entropy across N
+ *                  extraction passes — Farquhar 2024 / Nikitin 2024),
+ *                  conformalPValue (Phase 3.C guardrail signal).
+ *
+ * All new fields are optional so callers that only read the Phase 1
+ * shape continue to compile and run.
  */
 export interface ScoreBreakdown {
   fusedScore: number;
   confidence: number;
+  /** Phase 3: isotonic-mapped raw → calibrated. Omitted when disabled. */
+  calibratedConfidence?: number;
+  /** Phase 3: semantic-entropy across N extraction passes. Omitted on N=1. */
+  extractionEntropy?: number;
+  /** Phase 3.C: conformal p-value for the synthesize-side guardrail. */
+  conformalPValue?: number;
   decay: number;
   predBoost: number;
   finalScore: number;
