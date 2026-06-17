@@ -11,6 +11,7 @@ import {
   SynthesizeDto,
 } from './dto/synthesize.dto';
 import { buildDecisionLog, type DecisionLogEntry } from './decision-log';
+import { applyConformalGuardrail } from './conformal-guardrail';
 
 export interface Citation {
   factId: string;
@@ -95,6 +96,7 @@ export class SynthesizeService {
   private readonly defaultModel: string;
   private readonly limiter: Semaphore;
   private readonly defaultGuardrails: SynthesisGuardrails;
+  private readonly minCalibratedConfidence: number;
 
   constructor(
     private readonly search: SearchService,
@@ -128,6 +130,9 @@ export class SynthesizeService {
     );
     this.defaultGuardrails =
       raw === 'lenient' || raw === 'off' ? raw : 'strict';
+    this.minCalibratedConfidence = parseFloat(
+      this.configService.get<string>('SYNTHESIZE_MIN_CONFIDENCE', '0'),
+    );
   }
 
   async synthesize(
@@ -145,7 +150,20 @@ export class SynthesizeService {
       () => this.search.search(companyId, dto, callerScopes),
       { 'synthesize.guardrails': guardrails },
     );
-    const results = searchResult.results;
+    // Conformal guardrail: drop facts below the calibrated-confidence
+    // floor BEFORE the generator sees them as citation targets. Facts
+    // still appear in the DecisionLog (with the `low_score` reject
+    // reason) when the caller asked for `explain: true`. With the
+    // default floor of 0 this is a no-op.
+    const guardrail = applyConformalGuardrail(searchResult.results, {
+      minCalibratedConfidence: this.minCalibratedConfidence,
+    });
+    const results = guardrail.kept;
+    if (guardrail.droppedCount > 0) {
+      this.logger.debug(
+        `conformal guardrail dropped ${guardrail.droppedCount} fact(s) below ${this.minCalibratedConfidence}`,
+      );
+    }
 
     if (results.length === 0) {
       this.metrics?.countSynthesize('no_results');
