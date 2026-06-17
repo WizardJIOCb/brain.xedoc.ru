@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsString,
   IsOptional,
   IsObject,
@@ -7,6 +8,7 @@ import {
   Min,
   Max,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 /**
  * EntityRef and FactSource are unions / open shapes — class-validator's
@@ -52,4 +54,18 @@ export class IngestFactDto {
 
   @IsOptional() @IsObject()
   metadata?: Record<string, unknown>;
+
+  /**
+   * Emit a `conflictExplanation` alongside the outcome when the new
+   * fact lands in SUPERSEDED or COMPETING. Off by default to keep the
+   * response shape stable. Has no effect for INSERTED / REJECTED
+   * outcomes (no opponent to compare against).
+   *
+   * See `conflict-explainer.ts` for the shape and the deterministic
+   * narrative template.
+   */
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  explain?: boolean;
 }

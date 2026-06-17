@@ -18,6 +18,11 @@ import { IngestMentionDto } from './dto/ingest-mention.dto';
 import { IngestLinkDto } from './dto/ingest-link.dto';
 import { ConflictConfig, SOURCE_TRUST } from './conflict-resolver';
 import { traceSpan, traceArtifact } from '../common/debug-trace';
+import {
+  buildConflictExplanation,
+  type ConflictExplanation,
+  type ResolverConflictPayload,
+} from './conflict-explainer';
 
 export type IngestOutcome =
   | 'INSERTED'
@@ -31,6 +36,16 @@ export interface IngestResult {
   supersededFactIds?: string[];
   competingFactIds?: string[];
   reason?: string;
+  /**
+   * Populated only when the IngestFactDto carried `explain: true` AND
+   * the outcome is SUPERSEDED or COMPETING. Carries the TruthfulRAG-
+   * style slot delta + dominant dimension + score breakdown explaining
+   * why the new fact beat (or competes with) the strongest prior.
+   *
+   * See `conflict-explainer.ts` for the shape and the deterministic
+   * narrative template.
+   */
+  conflictExplanation?: ConflictExplanation;
 }
 
 @Injectable()
@@ -169,6 +184,18 @@ export class IngestService {
       }
       if (result?.competingFactIds) {
         out.competingFactIds = (result.competingFactIds as unknown[]).map(String);
+      }
+      if (dto.explain === true && factId && result?.bestOpponentId) {
+        out.conflictExplanation = buildConflictExplanation({
+          outcome: outcome as 'SUPERSEDED' | 'COMPETING',
+          factId,
+          bestOpponentId: String(result.bestOpponentId),
+          supersededFactIds: out.supersededFactIds,
+          competingFactIds: out.competingFactIds,
+          scoreBreakdown: result.scoreBreakdown as ResolverConflictPayload['scoreBreakdown'],
+          dominantDimension: result.dominantDimension as ResolverConflictPayload['dominantDimension'],
+          slotDelta: result.slotDelta as ResolverConflictPayload['slotDelta'],
+        });
       }
       return out;
     });
