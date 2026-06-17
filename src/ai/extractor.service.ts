@@ -64,9 +64,35 @@ export interface ExtractedFact {
   clause?: string;
 }
 
+/**
+ * Entity-entity relationship the extractor identified ("X works at Y",
+ * "X joined Y", "X owns Y"). The chat router doesn't traverse facts;
+ * graph queries traverse EDGES — without edges between named entities
+ * a question like "who works at Acme" can't reach Maria's role even
+ * when both facts exist independently.
+ *
+ * `kind` is open-vocabulary (works_at, lives_at, owns, knows,
+ * affiliated_with, …) — same EDC philosophy as predicates. Downstream
+ * canonicalisation of edge kinds is deferred (analogous to predicate
+ * canonicalize() — to be added when the registry covers edge types).
+ */
+export interface ExtractedEdge {
+  /** Index into entities[] — source of the relationship. */
+  fromEntityIndex: number;
+  /** Index into entities[] — target of the relationship. */
+  toEntityIndex: number;
+  /** Relationship type — lowercase snake_case verb-shape. */
+  kind: string;
+  /** 0..1 — extractor's confidence. */
+  confidence: number;
+  /** Optional verbatim clause that warranted this edge — trace only. */
+  clause?: string;
+}
+
 export interface ExtractionResult {
   entities: ExtractedEntity[];
   facts: ExtractedFact[];
+  edges: ExtractedEdge[];
 }
 
 /**
@@ -99,7 +125,7 @@ const ENTITY_TYPE_VOCABULARY = [
 const EXTRACTION_PROMPT_HEADER = `You are an entity-and-fact extractor for a knowledge graph.
 
 OUTPUT CONTRACT
-You output JSON with three top-level fields, in this order:
+You output JSON with four top-level fields, in this order:
 
   1. clauses[] — verbatim sub-spans of the input. Each entry is ONE independent
      assertion. A sentence with two conjuncts ("X is the CTO and prefers vegan
@@ -118,6 +144,26 @@ You output JSON with three top-level fields, in this order:
        predicate     — chosen from the closed predicate vocabulary
        valueSpan     — VERBATIM SUBSTRING of the input naming the value
        confidence    — 0..1, reserve >0.8 for explicit assertions, 0.5–0.8 for inferred
+
+  4. edges[] — entity-to-entity relationships the input asserts. A fact captures
+     an attribute of ONE entity (Maria.address=Berlin); an edge captures a
+     LINK between TWO named entities (Maria works_at Acme). Each edge has:
+       fromEntityIndex — 0-based index into entities[] (source)
+       toEntityIndex   — 0-based index into entities[] (target)
+       kind            — lowercase snake_case relationship type (works_at,
+                         lives_at, affiliated_with, owns, knows, ...)
+       clauseIndex     — 0-based index into clauses[]
+       confidence      — 0..1
+
+     Emit an edge whenever the text places one named entity in relation to
+     another. "X is the CTO at Y" → edge (X, works_at, Y). "X joined Y" →
+     edge (X, works_at, Y). "X owns Y" → edge (X, owns, Y). "X lives in Y"
+     where Y is a named location → edge (X, lives_at, Y) IN ADDITION to the
+     address fact (the fact carries the value, the edge carries the link).
+
+     Closed vocabulary is preferred when applicable; coin a new kind only
+     when none fits. Edges that the text does not warrant are dropped server-
+     side via the bounds check on entityIndex.
 
 THE VERBATIM RULE (most important):
   valueSpan MUST appear character-for-character somewhere in the input.
@@ -217,7 +263,7 @@ export class ExtractorService {
     companyId: string,
   ): Promise<ExtractionResult> {
     const trimmed = text.trim();
-    if (!trimmed) return { entities: [], facts: [] };
+    if (!trimmed) return { entities: [], facts: [], edges: [] };
 
     // Resolve the per-tenant active predicate set. Snapshot is TTL-cached
     // in the registry; the versionHash gets pinned in the trace so a
@@ -327,8 +373,35 @@ export class ExtractorService {
                     ],
                   },
                 },
+                edges: {
+                  type: 'array',
+                  description:
+                    'Entity-to-entity relationships. Bridge two named entities. "Maria is CTO at Acme" → edge (Maria, works_at, Acme). Without edges, graph traversal cannot reach Maria from Acme.',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      fromEntityIndex: { type: 'integer', minimum: 0 },
+                      toEntityIndex: { type: 'integer', minimum: 0 },
+                      kind: {
+                        type: 'string',
+                        description:
+                          'Lowercase snake_case relationship type. Common: works_at, lives_at, affiliated_with, owns, knows, located_in.',
+                      },
+                      clauseIndex: { type: 'integer', minimum: 0 },
+                      confidence: { type: 'number', minimum: 0, maximum: 1 },
+                    },
+                    required: [
+                      'fromEntityIndex',
+                      'toEntityIndex',
+                      'kind',
+                      'clauseIndex',
+                      'confidence',
+                    ],
+                  },
+                },
               },
-              required: ['clauses', 'entities', 'facts'],
+              required: ['clauses', 'entities', 'facts', 'edges'],
             },
           },
         },
@@ -340,14 +413,14 @@ export class ExtractorService {
     );
 
     const content = res.choices[0]?.message?.content;
-    if (!content) return { entities: [], facts: [] };
+    if (!content) return { entities: [], facts: [], edges: [] };
 
     let parsed: any;
     try {
       parsed = JSON.parse(content);
     } catch (err) {
       this.logger.warn(`Extractor returned non-JSON: ${(err as Error).message}`);
-      return { entities: [], facts: [] };
+      return { entities: [], facts: [], edges: [] };
     }
 
     const clauses: string[] = Array.isArray(parsed.clauses)
@@ -461,6 +534,69 @@ export class ExtractorService {
       traceArtifact('extractor.clauses', clauses);
     }
 
+    // Edges — entity-to-entity relationships. Each edge bridges two
+    // already-validated entities; dropped when an index points outside
+    // entities[], or the same entity (self-edge is meaningless), or
+    // when the kind is empty. No span grounding — kind is a coined
+    // verb-shape, not a substring of the input.
+    const droppedEdges: Array<{ kind?: string; reason: string }> = [];
+    const edges: ExtractedEdge[] = [];
+    if (Array.isArray(parsed.edges)) {
+      for (const e of parsed.edges as Array<Record<string, unknown>>) {
+        if (!e || typeof e !== 'object') continue;
+        const from = Number(e.fromEntityIndex);
+        const to = Number(e.toEntityIndex);
+        const kind = typeof e.kind === 'string' ? e.kind.trim().toLowerCase() : '';
+        if (
+          !Number.isInteger(from) ||
+          !Number.isInteger(to) ||
+          from < 0 ||
+          to < 0 ||
+          from >= entities.length ||
+          to >= entities.length
+        ) {
+          droppedEdges.push({
+            kind: kind || undefined,
+            reason: 'entity_index_out_of_bounds',
+          });
+          continue;
+        }
+        if (from === to) {
+          droppedEdges.push({ kind, reason: 'self_edge' });
+          continue;
+        }
+        if (kind.length === 0) {
+          droppedEdges.push({ kind: undefined, reason: 'empty_kind' });
+          continue;
+        }
+        const clauseIndex =
+          Number.isInteger(e.clauseIndex) && (e.clauseIndex as number) >= 0
+            ? (e.clauseIndex as number)
+            : undefined;
+        const clauseText =
+          clauseIndex !== undefined && clauseIndex < clauses.length
+            ? clauses[clauseIndex]
+            : undefined;
+        const confidence =
+          typeof e.confidence === 'number'
+            ? Math.max(0, Math.min(1, e.confidence))
+            : 0.7;
+        edges.push({
+          fromEntityIndex: from,
+          toEntityIndex: to,
+          kind,
+          confidence,
+          ...(clauseText ? { clause: clauseText } : {}),
+        });
+      }
+    }
+    if (edges.length > 0) {
+      traceArtifact('extractor.edges', edges);
+    }
+    if (droppedEdges.length > 0) {
+      traceArtifact('extractor.invalid_edges', { dropped: droppedEdges });
+    }
+
     // EDC canonicalization pass. For each fact, ask the registry to
     // resolve the (possibly-novel) predicate to its canonical id —
     // either matching an existing predicate, auto-aliasing a similar
@@ -534,7 +670,7 @@ export class ExtractorService {
       );
     }
 
-    return { entities, facts };
+    return { entities, facts, edges };
   }
 
   private normalizeType(t: unknown): ExtractedEntity['type'] {

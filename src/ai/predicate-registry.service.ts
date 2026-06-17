@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 import { SurrealService } from '../db/surreal.service';
 import { EmbedderService } from './embedder.service';
@@ -99,11 +100,15 @@ export type CanonicalizeDecision =
     };
 
 const SNAPSHOT_TTL_MS = 60_000;
-/** EDC similarity threshold for auto-alias. Above → alias the novel
- *  predicate to the existing canonical id. Below → INSERT as proposed
- *  for human/agent review. Threshold chosen per Mem0g / EDC paper
- *  recommendations (0.85 is conservative; rare false-merges). */
-const CANONICALIZE_AUTO_ALIAS_THRESHOLD = 0.85;
+/** Default EDC similarity threshold for auto-alias. Above → alias the
+ *  novel predicate to the existing canonical id. Below → INSERT as
+ *  proposed for human/agent review. The default (0.85) is the Mem0g /
+ *  EDC paper recommendation — conservative, rare false-merges. In
+ *  practice on text-embedding-3-small the score between a short coined
+ *  predicate name and a long predicate-card description is often lower
+ *  than 0.85 even when semantically equivalent, so operators commonly
+ *  lower this to 0.55-0.7 via PREDICATE_CANONICALIZE_THRESHOLD. */
+const DEFAULT_CANONICALIZE_AUTO_ALIAS_THRESHOLD = 0.85;
 /** Floor for "any meaningful match" — used purely to report bestMatch on
  *  the proposed outcome so an operator reviewing the queue sees what the
  *  closest existing predicate was. */
@@ -478,10 +483,20 @@ export class PredicateRegistryService {
   /** Per-tenant bootstrap flag — ensureBootstrap runs once per process per tenant. */
   private readonly bootstrapped = new Set<string>();
 
+  private readonly canonicalizeThreshold: number;
+
   constructor(
     private readonly surreal: SurrealService,
     private readonly embedder: EmbedderService,
-  ) {}
+    private readonly config: ConfigService,
+  ) {
+    this.canonicalizeThreshold = parseFloat(
+      this.config.get<string>(
+        'PREDICATE_CANONICALIZE_THRESHOLD',
+        String(DEFAULT_CANONICALIZE_AUTO_ALIAS_THRESHOLD),
+      ),
+    );
+  }
 
   /**
    * Idempotently INSERT every CORE_PREDICATE that isn't already in the
@@ -922,7 +937,7 @@ export class PredicateRegistryService {
       }
     }
 
-    if (best && best.similarity >= CANONICALIZE_AUTO_ALIAS_THRESHOLD) {
+    if (best && best.similarity >= this.canonicalizeThreshold) {
       // Insert as aliased — next time the same novel predicate appears,
       // the snapshot's aliasMap returns the canonical without an LLM
       // round-trip. Defensive: a concurrent canonicalize on the same

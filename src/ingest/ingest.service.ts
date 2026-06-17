@@ -315,14 +315,87 @@ export class IngestService {
           if (result.factId) factIds.push(result.factId);
         }
 
-        traceArtifact('ingest.mention.result', { entityIds, factIds });
+        // Edges between extracted entities. Each ExtractedEdge bridges
+        // two already-resolved entity IDs; idempotent RELATE handles
+        // duplicates from re-ingest. Failure on a single edge does not
+        // block the rest of the ingest — operator can re-run.
+        const edgeIds: string[] = [];
+        for (const e of extraction.edges) {
+          const fromEid = entityIds[e.fromEntityIndex];
+          const toEid = entityIds[e.toEntityIndex];
+          if (!fromEid || !toEid || fromEid === toEid) continue;
+          try {
+            const edgeId = await traceSpan(
+              'ingest.edge.upsert',
+              () =>
+                this.createEdgeBetween(db, fromEid, toEid, e.kind, {
+                  vertical: dto.contextRef.vertical,
+                  eventId: dto.contextRef.eventId,
+                  conversationId: dto.contextRef.conversationId,
+                  messageId: dto.contextRef.messageId,
+                  confidence: e.confidence,
+                }),
+              { kind: e.kind, from: fromEid, to: toEid },
+            );
+            if (edgeId) edgeIds.push(edgeId);
+          } catch (err) {
+            this.logger.warn(
+              `[ingest.edge] kind=${e.kind} from=${fromEid} to=${toEid} failed: ${(err as Error).message}`,
+            );
+          }
+        }
+
+        traceArtifact('ingest.mention.result', { entityIds, factIds, edgeIds });
         return {
           skipped: false,
           extractedEntityIds: entityIds,
           extractedFactIds: factIds,
+          extractedEdgeIds: edgeIds,
         };
       });
     });
+  }
+
+  /**
+   * Create a knowledge_edge between two ALREADY-resolved entity IDs.
+   * Used by ingestMention after extraction emits edges[] — we already
+   * have the entity IDs from the entity-resolution pass, no need to
+   * round-trip through external refs.
+   *
+   * Idempotent: UNIQUE on (in, out, kind) — concurrent / duplicate
+   * RELATEs return the existing edge id.
+   */
+  private async createEdgeBetween(
+    db: Surreal,
+    fromEntityId: string,
+    toEntityId: string,
+    kind: string,
+    source: Record<string, unknown>,
+  ): Promise<string | null> {
+    const fromRid = new StringRecordId(fromEntityId);
+    const toRid = new StringRecordId(toEntityId);
+    try {
+      const [edgeRows] = await db.query<[any[]]>(
+        `RELATE $from->knowledge_edge->$to CONTENT { kind: $kind, weight: $weight, source: $source } RETURN AFTER`,
+        {
+          from: fromRid,
+          to: toRid,
+          kind,
+          weight: 1.0,
+          source,
+        },
+      );
+      const edge = ((edgeRows as any[]) ?? [])[0];
+      return edge ? String(edge.id) : null;
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      const [existingRows] = await db.query<[any[]]>(
+        `SELECT id FROM knowledge_edge WHERE in = $from AND out = $to AND kind = $kind LIMIT 1`,
+        { from: fromRid, to: toRid, kind },
+      );
+      const existing = ((existingRows as any[]) ?? [])[0];
+      return existing ? String(existing.id) : null;
+    }
   }
 
   // ── ingestLink: declare an edge between two entities ─────────────────
