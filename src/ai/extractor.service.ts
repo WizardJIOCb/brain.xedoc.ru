@@ -9,6 +9,7 @@ import {
   PredicateDefinition,
 } from './predicate-registry.service';
 import { LocalPredicateSelectorService } from './local-predicate-selector.service';
+import { ExtractorCacheService } from './extractor-cache.service';
 
 /**
  * Closed-vocabulary, span-grounded entity-and-fact extractor.
@@ -232,6 +233,7 @@ export class ExtractorService {
     private readonly configService: ConfigService,
     private readonly registry: PredicateRegistryService,
     private readonly localPredicates: LocalPredicateSelectorService,
+    private readonly extractionCache: ExtractorCacheService,
   ) {
     const timeoutMs = parseInt(
       this.configService.get<string>('OPENAI_TIMEOUT_MS', '30000'),
@@ -293,6 +295,31 @@ export class ExtractorService {
           this.systemPromptHeader +
           snapshot.active.map(renderPredicateCard).join('\n');
     const vocab = snapshot.active.map((p) => p.predicateId);
+
+    // Exact-key cache check. Same (text, tenant, registry version) →
+    // same extraction. Hit replays the previously validated result
+    // without re-running OpenAI; cache miss flows through the normal
+    // pipeline and the result is cached at the end.
+    const cacheKey = this.extractionCache.computeKey({
+      text: trimmed,
+      companyId,
+      predicateVocabHash: snapshot.versionHash,
+    });
+    const cached = this.extractionCache.get(cacheKey);
+    if (cached) {
+      traceArtifact('extractor.cache_decision', {
+        hit: true,
+        key: cacheKey,
+        registryVersionHash: snapshot.versionHash,
+      });
+      return cached;
+    }
+    traceArtifact('extractor.cache_decision', {
+      hit: false,
+      key: cacheKey,
+      registryVersionHash: snapshot.versionHash,
+    });
+
     traceArtifact('extractor.vocab', {
       versionHash: snapshot.versionHash,
       predicateCount: vocab.length,
@@ -729,7 +756,9 @@ export class ExtractorService {
       );
     }
 
-    return { entities, facts, edges };
+    const result: ExtractionResult = { entities, facts, edges };
+    this.extractionCache.set(cacheKey, result);
+    return result;
   }
 
   private normalizeType(t: unknown): ExtractedEntity['type'] {
