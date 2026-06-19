@@ -82,7 +82,7 @@ jobs:
 
       - name: Real e2e (separate process + real OpenAI + SDK + MCP)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.BRAIN_OPENAI_API_KEY }}
         run: pnpm test:e2e:real
 
   # Multi-vertical quality eval — recall@k, MRR, extraction-recall,
@@ -154,7 +154,11 @@ jobs:
 
       - name: Quality eval (multi-vertical, real OpenAI)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Repo secret is `BRAIN_OPENAI_API_KEY` (org convention —
+          # every inite-* service prefixes its OpenAI key with the
+          # service name). The eval harness reads `OPENAI_API_KEY`,
+          # so we alias.
+          OPENAI_API_KEY: ${{ secrets.BRAIN_OPENAI_API_KEY }}
           # Tells the spec to write a machine-readable JSON report
           # alongside the human markdown — consumed by the diff step.
           BRAIN_EVAL_REPORT_OUT: .eval-current/report.json
