@@ -11,9 +11,12 @@ import { ExtractorCacheService } from './extractor-cache.service';
 import { LocalNerService } from './local-ner.service';
 import { ExtractionPatternService } from './extraction-pattern.service';
 import { CalibrationService } from './calibration/calibration.service';
+import { CalibrationRefitService } from './calibration/calibration-refit.service';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Global()
 @Module({
+  imports: [ScheduleModule.forRoot()],
   providers: [
     EmbedderService,
     ExtractorService,
@@ -27,6 +30,7 @@ import { CalibrationService } from './calibration/calibration.service';
     LocalNerService,
     ExtractionPatternService,
     CalibrationService,
+    CalibrationRefitService,
   ],
   exports: [
     EmbedderService,
@@ -41,6 +45,7 @@ import { CalibrationService } from './calibration/calibration.service';
     LocalNerService,
     ExtractionPatternService,
     CalibrationService,
+    CalibrationRefitService,
   ],
 })
 export class AiModule {}

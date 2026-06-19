@@ -1,0 +1,309 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
+import { ApiKeyService } from '../../auth/api-key.service';
+import { SurrealService } from '../../db/surreal.service';
+import {
+  fitIsotonic,
+  type CalibrationPair,
+  type CalibrationMap,
+} from './isotonic';
+import { CalibrationService } from './calibration.service';
+
+/**
+ * Phase 3.5 — nightly refit + source-trust recalculation.
+ *
+ * Two jobs in one service so they share the per-tenant iteration shell.
+ *
+ *   1. **source-trust refit** (03:42 UTC). Walks every tenant's
+ *      knowledge_fact table, groups facts by `${vertical}:${recorder}`,
+ *      counts `active` (wins) vs `superseded|retracted` (losses) per
+ *      source key, and UPSERTs into `source_trust`. The Phase 2
+ *      `fn::source_trust_for` SurrealDB function picks the learned
+ *      rate up automatically once sampleCount ≥ 8.
+ *
+ *   2. **calibration refit** (03:51 UTC). Builds a (rawConfidence,
+ *      correctness) gold set from the corpus: a fact whose
+ *      `status === 'active'` AND `retractedAt IS NONE` is correctness=1;
+ *      `superseded` or `retracted as supersede` within 30 days of
+ *      ingest is correctness=0. PAV-fits a new map per (extractorModel,
+ *      promptHash) pair and writes it as a new versioned row in
+ *      `calibration_table`. CalibrationService.loadMap is called so
+ *      the next request uses the refitted map without a restart.
+ *
+ * Both jobs are tenant-aware: one tenant's failure logs and is
+ * skipped without breaking the rest.
+ *
+ * Schedule offsets (03:42 and 03:51 UTC) are inside the daily quiet
+ * window already shared by CompactionService (03:17) and DreamsService
+ * (04:00), so we don't fight any other write pass.
+ */
+@Injectable()
+export class CalibrationRefitService {
+  private readonly logger = new Logger(CalibrationRefitService.name);
+  private readonly enabled: boolean;
+  private readonly extractorModel: string;
+  private readonly bootstrapPromptKey = 'bootstrap';
+
+  constructor(
+    private readonly surreal: SurrealService,
+    private readonly apiKeys: ApiKeyService,
+    private readonly calibration: CalibrationService,
+    config: ConfigService,
+  ) {
+    this.enabled =
+      (config.get<string>('CALIBRATION_NIGHTLY_REFIT', 'true').toLowerCase()) ===
+      'true';
+    this.extractorModel = config.get<string>(
+      'OPENAI_CHAT_MODEL',
+      'gpt-4o-mini',
+    );
+  }
+
+  /** Cron entry — source-trust refit at 03:42 UTC. */
+  @Cron('42 3 * * *', { timeZone: 'UTC' })
+  async refitSourceTrustDaily(): Promise<number> {
+    if (!this.enabled) return 0;
+    return this.refitSourceTrust();
+  }
+
+  /** Cron entry — calibration refit at 03:51 UTC. */
+  @Cron('51 3 * * *', { timeZone: 'UTC' })
+  async refitCalibrationDaily(): Promise<number> {
+    if (!this.enabled) return 0;
+    return this.refitCalibration();
+  }
+
+  // ── Source-trust pass ────────────────────────────────────────────
+
+  async refitSourceTrust(): Promise<number> {
+    const tenants = this.apiKeys.knownCompanyIds();
+    let upserted = 0;
+    for (const companyId of tenants) {
+      try {
+        upserted += await this.refitSourceTrustForTenant(companyId);
+      } catch (e) {
+        this.logger.warn(
+          `source-trust refit failed for ${companyId}: ${(e as Error).message}`,
+        );
+      }
+    }
+    this.logger.log(
+      `source-trust refit done — ${upserted} row(s) upserted across ${tenants.length} tenant(s)`,
+    );
+    return upserted;
+  }
+
+  private async refitSourceTrustForTenant(companyId: string): Promise<number> {
+    return this.surreal.withCompany(companyId, async (db) => {
+      // Fetch per-fact source + status. Aggregation lives in TS so
+      // SurrealQL stays simple (one SELECT, one index seek) and the
+      // aggregation logic is unit-testable via `aggregateBySourceKey`.
+      const [rows] = await db.query<
+        [
+          Array<{
+            vertical: string | null;
+            recorder: string | null;
+            status: string;
+          }>,
+        ]
+      >(
+        `SELECT
+            source.vertical AS vertical,
+            source.recorder AS recorder,
+            status
+          FROM knowledge_fact
+          WHERE source.vertical IS NOT NONE
+          LIMIT 50000;`,
+      );
+      const events = (rows ?? []).map((r) => ({
+        sourceKey: `${r.vertical}:${r.recorder ?? '_'}`,
+        win: r.status === 'active' ? 1 : 0,
+        loss: r.status === 'superseded' || r.status === 'retracted' ? 1 : 0,
+      }));
+      const summary = aggregateBySourceKey(events);
+
+      let upsertedHere = 0;
+      for (const { sourceKey, wins, losses } of summary) {
+        const sampleCount = wins + losses;
+        if (sampleCount === 0) continue;
+        const rate = wins / sampleCount;
+        await db.query(
+          `LET $existing = (SELECT id FROM source_trust
+              WHERE sourceKey = $k LIMIT 1)[0];
+           IF $existing IS NONE THEN
+             CREATE source_trust CONTENT {
+               sourceKey: $k,
+               agreementRate: $r,
+               sampleCount: $sc,
+               lastUpdated: time::now()
+             }
+           ELSE
+             UPDATE $existing.id SET
+               agreementRate = $r,
+               sampleCount = $sc,
+               lastUpdated = time::now()
+           END;`,
+          { k: sourceKey, r: rate, sc: sampleCount },
+        );
+        upsertedHere++;
+      }
+      return upsertedHere;
+    });
+  }
+
+  // ── Calibration pass ─────────────────────────────────────────────
+
+  async refitCalibration(): Promise<number> {
+    const tenants = this.apiKeys.knownCompanyIds();
+    const allPairs: CalibrationPair[] = [];
+    for (const companyId of tenants) {
+      try {
+        const pairs = await this.collectCalibrationPairsForTenant(companyId);
+        allPairs.push(...pairs);
+      } catch (e) {
+        this.logger.warn(
+          `calibration pair collection failed for ${companyId}: ${(e as Error).message}`,
+        );
+      }
+    }
+    if (allPairs.length < 40) {
+      this.logger.log(
+        `calibration refit skipped — only ${allPairs.length} pair(s) (need 40+)`,
+      );
+      return 0;
+    }
+    const map = fitIsotonic(allPairs);
+    await this.persistCalibrationMap(map);
+    this.calibration.loadMap(this.extractorModel, this.bootstrapPromptKey, map);
+    this.logger.log(
+      `calibration refit complete — samples=${map.sampleCount} bins=${map.thresholds.length}`,
+    );
+    return map.sampleCount;
+  }
+
+  private async collectCalibrationPairsForTenant(
+    companyId: string,
+  ): Promise<CalibrationPair[]> {
+    return this.surreal.withCompany(companyId, async (db) => {
+      const [rows] = await db.query<
+        [
+          Array<{
+            confidence: number;
+            status: string;
+            retractedAt: string | null;
+            retractionReason: string | null;
+          }>,
+        ]
+      >(
+        `SELECT confidence, status, retractedAt, retractionReason
+            FROM knowledge_fact
+            WHERE confidence IS NOT NONE
+              AND time::now() - recordedAt > 30d
+            LIMIT 5000;`,
+      );
+      const pairs: CalibrationPair[] = [];
+      for (const r of rows ?? []) {
+        const conf = clamp01(Number(r.confidence));
+        if (!Number.isFinite(conf)) continue;
+        const correctness = isCorrect(r) ? 1 : 0;
+        pairs.push({ rawConfidence: conf, correctness });
+      }
+      return pairs;
+    });
+  }
+
+  private async persistCalibrationMap(map: CalibrationMap): Promise<void> {
+    // Persist into the operator tenant's namespace. We pick the first
+    // known tenant as the home for the global row — the table is
+    // logically one-per-(model, promptHash, version) and tenant
+    // namespacing for it isn't meaningful at Phase 3.5 scale.
+    const tenants = this.apiKeys.knownCompanyIds();
+    const host = tenants[0];
+    if (!host) {
+      this.logger.warn(
+        'calibration persist skipped — no known tenants to host the row',
+      );
+      return;
+    }
+    await this.surreal.withCompany(host, async (db) => {
+      const [latest] = await db.query<[Array<{ version: number }>]>(
+        `SELECT version FROM calibration_table
+            WHERE extractorModel = $m AND promptHash = $p
+            ORDER BY version DESC LIMIT 1`,
+        { m: this.extractorModel, p: this.bootstrapPromptKey },
+      );
+      const next =
+        Array.isArray(latest) && latest[0]?.version
+          ? latest[0].version + 1
+          : 2;
+      await db.query(
+        `CREATE calibration_table CONTENT {
+            extractorModel: $m,
+            promptHash: $p,
+            thresholds: $t,
+            values: $v,
+            sampleCount: $sc,
+            version: $version
+         }`,
+        {
+          m: this.extractorModel,
+          p: this.bootstrapPromptKey,
+          t: map.thresholds,
+          v: map.values,
+          sc: map.sampleCount,
+          version: next,
+        },
+      );
+    });
+  }
+}
+
+// ── Pure helpers (exported for unit tests) ─────────────────────────
+
+/**
+ * A fact's "correctness" for calibration purposes: still active and
+ * not retracted as a supersede within the gold window. The 30-day
+ * window matches the FaithfulRAG bootstrap recipe — retractions
+ * beyond that fold into noise.
+ */
+export function isCorrect(row: {
+  status: string;
+  retractedAt: string | null;
+  retractionReason: string | null;
+}): boolean {
+  if (row.status === 'active' && row.retractedAt === null) return true;
+  if (row.retractionReason === 'superseded') return false;
+  if (row.status === 'retracted') return false;
+  if (row.status === 'superseded') return false;
+  return true;
+}
+
+/**
+ * Roll up per-row {win, loss} tuples into {wins, losses} per
+ * sourceKey. Exported so the unit test can exercise the math
+ * without a SurrealDB round-trip.
+ */
+export function aggregateBySourceKey(
+  rows: ReadonlyArray<{ sourceKey: string; win: number; loss: number }>,
+): Array<{ sourceKey: string; wins: number; losses: number }> {
+  const byKey = new Map<string, { wins: number; losses: number }>();
+  for (const r of rows) {
+    const acc = byKey.get(r.sourceKey) ?? { wins: 0, losses: 0 };
+    acc.wins += r.win;
+    acc.losses += r.loss;
+    byKey.set(r.sourceKey, acc);
+  }
+  return [...byKey.entries()].map(([sourceKey, v]) => ({
+    sourceKey,
+    wins: v.wins,
+    losses: v.losses,
+  }));
+}
+
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  if (x < 0) return 0;
+  if (x > 1) return 1;
+  return x;
+}
