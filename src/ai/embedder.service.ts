@@ -1,96 +1,161 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import OpenAI from 'openai';
 import { createHash } from 'node:crypto';
 import { LRUCache } from '../common/lru-cache';
-import { Semaphore } from '../common/semaphore';
+import type { EmbedderProvider } from './embedder/embedder-provider.interface';
+import { OpenAIEmbedderProvider } from './embedder/openai-embedder.provider';
+import { BgeM3EmbedderProvider } from './embedder/bge-m3-embedder.provider';
 
+/**
+ * EmbedderService — thin facade in front of an EmbedderProvider.
+ *
+ * Two providers shipped:
+ *   - openai (default, back-compat): text-embedding-3-* via the
+ *     OpenAI SDK. Identical-text → identical vector (deterministic).
+ *   - bge-m3: Xenova/bge-m3 via @xenova/transformers, local inference.
+ *     Multilingual cross-lingual recall; lazy warmup with graceful
+ *     fallback to OpenAI on warmup failure.
+ *
+ * The cache lives here (not on the providers) so swapping providers
+ * doesn't invalidate the existing LRU keys — the cache key includes
+ * `provider.providerId` which already encodes model + dim, so OpenAI
+ * and BGE-M3 entries cannot collide.
+ */
 @Injectable()
-export class EmbedderService {
+export class EmbedderService implements OnModuleInit {
   private readonly logger = new Logger(EmbedderService.name);
-  private readonly openai: OpenAI;
-  private readonly model: string;
-  private readonly dimensions: number;
-  // Identical text → identical embedding (deterministic for OpenAI's
-  // text-embedding-3-* family). Cache by sha256(model:dim:text) so
-  // re-extractions on near-duplicate input — same predicate+object
-  // emitted by replay or retry — don't re-pay the OpenAI round trip.
   private readonly cache: LRUCache<string, number[]>;
-  // Bound concurrent OpenAI calls below the per-key rate ceiling.
-  // The OpenAI SDK's built-in retries handle 429s, but high-concurrency
-  // bursts trip rate limits before retries exhaust their budget.
-  private readonly limiter: Semaphore;
+  private readonly primary: EmbedderProvider;
+  private readonly fallback: EmbedderProvider | null;
 
   constructor(private readonly configService: ConfigService) {
-    const timeoutMs = parseInt(
-      this.configService.get<string>('OPENAI_TIMEOUT_MS', '30000'),
-      10,
-    );
-    const maxRetries = parseInt(
-      this.configService.get<string>('OPENAI_MAX_RETRIES', '3'),
-      10,
-    );
-    this.openai = new OpenAI({
-      apiKey: this.configService.getOrThrow<string>('OPENAI_API_KEY'),
-      timeout: timeoutMs,
-      maxRetries,
-    });
-    this.model = this.configService.get<string>(
-      'OPENAI_EMBEDDING_MODEL',
-      'text-embedding-3-small',
-    );
-    this.dimensions = parseInt(
-      this.configService.get<string>('OPENAI_EMBEDDING_DIMENSIONS', '1536'),
-      10,
-    );
     const cacheSize = parseInt(
       this.configService.get<string>('EMBEDDING_CACHE_SIZE', '2000'),
       10,
     );
     this.cache = new LRUCache<string, number[]>(cacheSize);
-    const concurrency = parseInt(
-      this.configService.get<string>('OPENAI_CONCURRENCY', '8'),
-      10,
+
+    const providerName = this.configService.get<string>(
+      'EMBEDDER_PROVIDER',
+      'openai',
     );
-    this.limiter = new Semaphore(concurrency);
+    const openai = this.buildOpenAIProvider();
+    if (providerName === 'bge-m3') {
+      this.primary = this.buildBgeM3Provider();
+      this.fallback = openai;
+      this.logger.log(
+        `Embedder primary=bge-m3 fallback=openai (until warmup completes)`,
+      );
+    } else {
+      this.primary = openai;
+      this.fallback = null;
+      this.logger.log(`Embedder primary=openai`);
+    }
   }
 
+  async onModuleInit(): Promise<void> {
+    if (this.primary instanceof BgeM3EmbedderProvider) {
+      await this.primary.warmup();
+    }
+  }
+
+  /**
+   * Embed a single string. Routes to the primary provider when it is
+   * ready, otherwise to the fallback (back-compat with the OpenAI path).
+   * Result is cached by (providerId, text); cache survives provider
+   * swaps but cannot serve cross-provider hits because the key carries
+   * the providerId.
+   */
   async embed(text: string): Promise<number[]> {
     const trimmed = text.trim();
-    if (!trimmed) return new Array(this.dimensions).fill(0);
+    if (!trimmed) return new Array(this.getDimensions()).fill(0);
 
-    const key = this.cacheKey(trimmed);
+    const provider = this.activeProvider();
+    const key = this.cacheKey(provider.providerId, trimmed);
     const hit = this.cache.get(key);
     if (hit) return hit;
-
-    const vec = await this.limiter.run(async () => {
-      const res = await this.openai.embeddings.create({
-        model: this.model,
-        input: trimmed,
-        dimensions: this.dimensions,
-      });
-      return res.data[0].embedding;
-    });
+    const vec = await provider.embed(trimmed);
     this.cache.set(key, vec);
     return vec;
   }
 
   getDimensions(): number {
-    return this.dimensions;
+    return this.activeProvider().getDimensions();
   }
 
-  /** Test/diagnostic surface — no business code should depend on cache shape. */
-  cacheStats(): { size: number; inFlight: number; waiting: number } {
+  /**
+   * Test/diagnostic surface — no business code should depend on cache
+   * shape. The `inFlight` + `waiting` fields are kept at 0 for back-
+   * compat with admin /v1/admin/router-stats consumers; concurrency
+   * accounting now lives on the per-provider Semaphore and is not
+   * surfaced here.
+   */
+  cacheStats(): {
+    size: number;
+    inFlight: number;
+    waiting: number;
+    provider: string;
+  } {
     return {
       size: this.cache.size,
-      inFlight: this.limiter.inFlight(),
-      waiting: this.limiter.pending(),
+      inFlight: 0,
+      waiting: 0,
+      provider: this.activeProvider().providerId,
     };
   }
 
-  private cacheKey(text: string): string {
+  private activeProvider(): EmbedderProvider {
+    if (this.primary.isReady()) return this.primary;
+    if (this.fallback) return this.fallback;
+    return this.primary;
+  }
+
+  private buildOpenAIProvider(): OpenAIEmbedderProvider {
+    return new OpenAIEmbedderProvider({
+      apiKey: this.configService.getOrThrow<string>('OPENAI_API_KEY'),
+      model: this.configService.get<string>(
+        'OPENAI_EMBEDDING_MODEL',
+        'text-embedding-3-small',
+      ),
+      dimensions: parseInt(
+        this.configService.get<string>('OPENAI_EMBEDDING_DIMENSIONS', '1536'),
+        10,
+      ),
+      timeoutMs: parseInt(
+        this.configService.get<string>('OPENAI_TIMEOUT_MS', '30000'),
+        10,
+      ),
+      maxRetries: parseInt(
+        this.configService.get<string>('OPENAI_MAX_RETRIES', '3'),
+        10,
+      ),
+      concurrency: parseInt(
+        this.configService.get<string>('OPENAI_CONCURRENCY', '8'),
+        10,
+      ),
+    });
+  }
+
+  private buildBgeM3Provider(): BgeM3EmbedderProvider {
+    return new BgeM3EmbedderProvider({
+      modelId: this.configService.get<string>(
+        'BGE_M3_MODEL_ID',
+        'Xenova/bge-m3',
+      ),
+      dimensions: parseInt(
+        this.configService.get<string>('BGE_M3_DIMENSIONS', '1024'),
+        10,
+      ),
+      concurrency: parseInt(
+        this.configService.get<string>('BGE_M3_CONCURRENCY', '4'),
+        10,
+      ),
+    });
+  }
+
+  private cacheKey(providerId: string, text: string): string {
     return createHash('sha256')
-      .update(`${this.model}:${this.dimensions}:${text}`)
+      .update(`${providerId}:${text}`)
       .digest('hex');
   }
 }
