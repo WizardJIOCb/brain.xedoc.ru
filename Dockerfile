@@ -39,6 +39,16 @@ RUN pnpm build
 # ── Runtime ──────────────────────────────────────────────────────────────
 FROM node:22-slim
 
+# wget is preinstalled on node:22-alpine but NOT on -slim (Debian).
+# The deploy workflow's docker-compose healthcheck shells `wget -qO-
+# http://localhost:3000/health` from inside the container, so without
+# it the container-level health probe never goes green and the deploy
+# job's "internal health probe" wait loop times out even though the
+# Nest app booted cleanly.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends wget \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml* ./
