@@ -3,7 +3,10 @@ import {
   Body,
   Controller,
   Get,
+  HttpException,
+  Logger,
   Post,
+  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import { ApiKeyGuard, RequireScopes } from '../auth/api-key.guard';
@@ -41,6 +44,8 @@ export const DEMO_LIVE_COMPANY = 'demo_live';
 @Controller('v1/admin/demo')
 @UseGuards(ApiKeyGuard)
 export class AdminDemoController {
+  private readonly logger = new Logger(AdminDemoController.name);
+
   constructor(
     private readonly surreal: SurrealService,
     private readonly ingest: IngestService,
@@ -132,36 +137,65 @@ export class AdminDemoController {
     if (!body?.message?.trim()) {
       throw new BadRequestException('message is required');
     }
-    const captured = await runWithDebugTrace(async () => {
-      const knownNames = await this.fetchKnownEntityNames();
-      const route: ChatRoute = await this.chatRouter.route(body.message, {
-        knownNames,
-        companyId: DEMO_LIVE_COMPANY,
+    try {
+      const captured = await runWithDebugTrace(async () => {
+        const knownNames = await this.fetchKnownEntityNames();
+        const route: ChatRoute = await this.chatRouter.route(body.message, {
+          knownNames,
+          companyId: DEMO_LIVE_COMPANY,
+        });
+        if (route.intent === 'tell') {
+          return this.runTellChat(route);
+        }
+        return this.runAskChat(route, body);
       });
-      if (route.intent === 'tell') {
-        return this.runTellChat(route);
+      const result = captured.result as any;
+      if (result.search) {
+        result.search = {
+          results: enrichResults(
+            result.search.results,
+            captured.trace.artifacts,
+            result.strategy,
+          ),
+        };
       }
-      return this.runAskChat(route, body);
-    });
-    const result = captured.result as any;
-    if (result.search) {
-      result.search = {
-        results: enrichResults(
-          result.search.results,
-          captured.trace.artifacts,
-          result.strategy,
-        ),
+      return {
+        ...result,
+        trace: {
+          requestId: captured.trace.requestId,
+          totalMs: captured.trace.totalMs,
+          spans: captured.trace.spans,
+          artifacts: captured.trace.artifacts,
+        },
       };
+    } catch (err) {
+      // Preserve typed Nest exceptions (BadRequest, Forbidden, ...);
+      // they're semantically meaningful and the client routes on them.
+      if (err instanceof HttpException) throw err;
+      // Classify transient upstream LLM failures (OpenAI premature
+      // close / connection drops after the SDK's own retries). These
+      // are NOT bugs in our pipeline — they're an external dependency
+      // outage. Surface as 503 with a retry hint so the chat UI can
+      // back off and replay instead of showing the operator a
+      // generic 500.
+      const e = err as Error & { code?: string };
+      const isUpstream =
+        e.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+        /api\.openai\.com|Premature close|ECONNRESET|ETIMEDOUT|fetch failed/i.test(
+          e.message ?? '',
+        );
+      if (isUpstream) {
+        this.logger.warn(
+          `/v1/admin/demo/chat upstream LLM unavailable: ${e.message}`,
+        );
+        throw new ServiceUnavailableException({
+          reason: 'upstream_llm_unavailable',
+          detail: e.message,
+          retryAfterMs: 2000,
+        });
+      }
+      throw err;
     }
-    return {
-      ...result,
-      trace: {
-        requestId: captured.trace.requestId,
-        totalMs: captured.trace.totalMs,
-        spans: captured.trace.spans,
-        artifacts: captured.trace.artifacts,
-      },
-    };
   }
 
   private async runTellChat(route: ChatRoute) {

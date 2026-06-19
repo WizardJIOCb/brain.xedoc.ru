@@ -1,4 +1,21 @@
-FROM node:22-alpine AS builder
+# node:22-slim (Debian-based, glibc) — NOT alpine.
+#
+# Why: `onnxruntime-node` (transitive dep of @xenova/transformers,
+# used by LocalNerService + IntentClassifierService) ships precompiled
+# linux/x64 binaries that link against the glibc dynamic linker
+# `ld-linux-x86-64.so.2`. Alpine's musl libc does not provide it, so
+# the model warmup throws on prod boot:
+#
+#   "Error loading shared library ld-linux-x86-64.so.2: No such file
+#    or directory (needed by .../libonnxruntime.so.1.14.0)"
+#
+# The services degrade gracefully (extractor falls back to LLM-only
+# NER, router to punctuation-only intent), but we lose the local
+# pre-pass speed-up. Switching to Debian slim is the simplest fix —
+# `apk add gcompat libc6-compat` is unreliable for native ABIs this
+# specific.
+
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
@@ -15,7 +32,7 @@ COPY src ./src
 RUN pnpm build
 
 # ── Runtime ──────────────────────────────────────────────────────────────
-FROM node:22-alpine
+FROM node:22-slim
 
 WORKDIR /app
 
