@@ -1,9 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { Semaphore } from '../common/semaphore';
 import { clampLlmInputText } from '../common/input-limits';
 import { traceArtifact } from '../common/debug-trace';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 import {
   PredicateRegistryService,
   CORE_PREDICATES,
@@ -86,6 +88,7 @@ export class ExtractorService {
     private readonly extractionCache: ExtractorCacheService,
     private readonly localNer: LocalNerService,
     private readonly extractionPatterns: ExtractionPatternService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     const timeoutMs = parseInt(
       this.configService.get<string>('OPENAI_TIMEOUT_MS', '30000'),
@@ -270,23 +273,33 @@ export class ExtractorService {
 
   private async callLlm(trimmed: string, systemPrompt: string): Promise<any> {
     const res = await this.limiter.run(() =>
-      this.openai.chat.completions.create({
-        model: this.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: trimmed },
-        ],
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'extraction',
-            strict: true,
-            schema: buildExtractionSchema(),
-          },
+      withGenAiCall(
+        {
+          kind: 'chat',
+          spanName: 'gen_ai.chat.extractor',
+          system: 'openai',
+          model: this.model,
         },
-        max_completion_tokens: 1500,
-        temperature: 0.1,
-      }),
+        this.metrics,
+        () =>
+          this.openai.chat.completions.create({
+            model: this.model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: trimmed },
+            ],
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: 'extraction',
+                strict: true,
+                schema: buildExtractionSchema(),
+              },
+            },
+            max_completion_tokens: 1500,
+            temperature: 0.1,
+          }),
+      ),
     );
     const content = res.choices[0]?.message?.content;
     if (!content) return null;

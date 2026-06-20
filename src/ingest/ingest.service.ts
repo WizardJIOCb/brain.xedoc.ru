@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { MetricsService } from '../metrics/metrics.service';
 import { Surreal, StringRecordId } from 'surrealdb';
 import {
   SurrealService,
@@ -61,6 +62,7 @@ export class IngestService {
     private readonly hype: HypeService,
     private readonly configService: ConfigService,
     private readonly predicateRegistry: PredicateRegistryService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     this.conflict = {
       similarityThreshold: this.cfgNum('CONFLICT_SIMILARITY_THRESHOLD', 0.85),
@@ -218,6 +220,7 @@ export class IngestService {
           slotDelta: result.slotDelta as ResolverConflictPayload['slotDelta'],
         });
       }
+      this.recordIngestFactMetric(outcome);
       return out;
     });
   }
@@ -277,6 +280,13 @@ export class IngestService {
     return arr[0] ? String(arr[0]) : null;
   }
 
+  // Extracted to keep `ingestFact`'s cyclomatic complexity under the
+  // 25-branch eslint ceiling — the `if (outcome)` branch alone pushed
+  // the analyser over.
+  private recordIngestFactMetric(outcome: unknown): void {
+    if (outcome) this.metrics?.countIngestFact(String(outcome));
+  }
+
   private sourceTrustFor(source: { vertical: string; eventId?: string; messageId?: string }): number {
     // Heuristic: derive a trust label from source shape.
     if (source.eventId?.startsWith('billing.'))   return SOURCE_TRUST.billing_event;
@@ -288,6 +298,17 @@ export class IngestService {
 
   // ── ingestMention: free-text → LLM extraction → fact records ─────────
   async ingestMention(companyId: string, dto: IngestMentionDto) {
+    try {
+      return await this.runIngestMention(companyId, dto);
+    } catch (err) {
+      // Record the failure on the metric counter before re-throwing so the
+      // operator sees mention-ingest-failure spikes without grepping logs.
+      this.metrics?.countIngestMention('failed');
+      throw err;
+    }
+  }
+
+  private async runIngestMention(companyId: string, dto: IngestMentionDto) {
     return traceSpan('ingest.mention', async () => {
       const text = redactPii(dto.text);
       traceArtifact('ingest.mention.input', {
@@ -297,6 +318,7 @@ export class IngestService {
       });
 
       if (!text.trim()) {
+        this.metrics?.countIngestMention('skipped');
         return { skipped: true, reason: 'empty', extractedEntityIds: [], extractedFactIds: [] };
       }
 
@@ -306,6 +328,7 @@ export class IngestService {
       traceArtifact('ingest.nlu.extracted', extraction);
 
       if (extraction.entities.length === 0) {
+        this.metrics?.countIngestMention('skipped');
         return {
           skipped: true,
           reason: 'no_entities',
@@ -393,6 +416,7 @@ export class IngestService {
         }
 
         traceArtifact('ingest.mention.result', { entityIds, factIds, edgeIds });
+        this.metrics?.countIngestMention('extracted');
         return {
           skipped: false,
           extractedEntityIds: entityIds,

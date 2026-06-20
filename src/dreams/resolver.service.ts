@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Surreal, StringRecordId } from 'surrealdb';
 import OpenAI from 'openai';
 import { Semaphore } from '../common/semaphore';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 import { withSpan } from '../common/tracing';
 
 /**
@@ -55,7 +57,10 @@ export class DreamsResolverService {
   private readonly maxPairs: number;
   private readonly limiter: Semaphore;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     this.enabled =
       this.configService.get<string>('DREAMS_RESOLVE_ENABLED', '0') === '1';
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
@@ -217,7 +222,15 @@ Output strictly the JSON shape requested.`;
       `(confidence=${pair.b.confidence.toFixed(2)}, validFrom=${pair.b.validFrom.slice(0, 10)}, recordedAt=${pair.b.recordedAt.slice(0, 10)})`;
 
     try {
-      const res = await this.openai.chat.completions.create({
+      const res = await withGenAiCall(
+        {
+          kind: 'chat',
+          spanName: 'gen_ai.chat.dreams_resolver',
+          system: 'openai',
+          model: this.model,
+        },
+        this.metrics,
+        () => this.openai.chat.completions.create({
         model: this.model,
         messages: [
           { role: 'system', content: sys },
@@ -244,7 +257,8 @@ Output strictly the JSON shape requested.`;
         },
         max_completion_tokens: 200,
         temperature: 0,
-      });
+      }),
+      );
       const content = res.choices[0]?.message?.content;
       if (!content) return { kind: 'unsure' };
       const parsed = JSON.parse(content) as {

@@ -1,7 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { Semaphore } from '../common/semaphore';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 import {
   FactToSummarize,
   SummaryGenerator,
@@ -35,7 +37,10 @@ export class LlmSummaryGenerator implements SummaryGenerator {
   private readonly enabled: boolean;
   private readonly limiter: Semaphore;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     this.enabled =
       this.configService.get<string>('DREAMS_LLM_SUMMARY_ENABLED', '0') === '1';
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
@@ -97,7 +102,15 @@ Rules:
       .join('\n');
     const user = `Facts (chronological):\n${lines}`;
 
-    const res = await this.openai.chat.completions.create({
+    const res = await withGenAiCall(
+      {
+        kind: 'chat',
+        spanName: 'gen_ai.chat.dreams_summary',
+        system: 'openai',
+        model: this.model,
+      },
+      this.metrics,
+      () => this.openai.chat.completions.create({
       model: this.model,
       messages: [
         { role: 'system', content: sys },
@@ -105,7 +118,8 @@ Rules:
       ],
       max_completion_tokens: 200,
       temperature: 0,
-    });
+    }),
+    );
     const content = res.choices[0]?.message?.content?.trim();
     if (!content) return '';
     // Defensive cap — LLMs occasionally over-write past the prompt

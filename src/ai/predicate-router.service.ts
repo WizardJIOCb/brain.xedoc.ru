@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { Semaphore } from '../common/semaphore';
 import { createHash } from 'node:crypto';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 
 /**
  * Predicate-class query router.
@@ -85,7 +87,10 @@ export class PredicateRouterService {
   private readonly cache: Map<string, RouterClassification> = new Map();
   private readonly cacheLimit: number;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     this.enabled =
       this.configService.get<string>('SEARCH_PREDICATE_ROUTER_ENABLED', '0') ===
       '1';
@@ -193,7 +198,15 @@ Examples of joint reasoning:
 - "Maya age 34" → dob dominates. Age expressions imply a birth-year window.`;
     const user = `Query: ${query}`;
 
-    const res = await this.openai.chat.completions.create({
+    const res = await withGenAiCall(
+      {
+        kind: 'chat',
+        spanName: 'gen_ai.chat.predicate_router',
+        system: 'openai',
+        model: this.model,
+      },
+      this.metrics,
+      () => this.openai.chat.completions.create({
       model: this.model,
       messages: [
         { role: 'system', content: sys },
@@ -231,7 +244,8 @@ Examples of joint reasoning:
       },
       max_completion_tokens: 384,
       temperature: 0,
-    });
+    }),
+    );
     const content = res.choices[0]?.message?.content;
     if (!content) return null;
     let parsed: any;

@@ -1,7 +1,8 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac } from 'node:crypto';
 import { SurrealService, dbCreate } from '../db/surreal.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { ForgetEntityDto } from './dto/forget.dto';
 import { policyFor, PREDICATE_POLICIES } from '../ingest/conflict-resolver';
 import { BrainScope } from '../auth/api-key.types';
@@ -60,6 +61,7 @@ export class EntitiesService {
   constructor(
     private readonly surreal: SurrealService,
     private readonly configService: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     // Used to hash forgotten entity ids in the tombstone. If unset, derive
     // a per-process default — safe enough for 0.1.0 walking skeleton, but
@@ -366,6 +368,8 @@ export class EntitiesService {
         `[knowledge.entity.forgotten] companyId=${companyId} hash=${entityIdHash} ` +
         `factsDeleted=${factsDeleted} edgesDeleted=${edgesDeleted} reason=${dto.reason}`,
       );
+
+      this.metrics?.countForget();
 
       return {
         entityIdHash,

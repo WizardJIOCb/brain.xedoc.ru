@@ -1,7 +1,9 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 import { LRUCache } from '../common/lru-cache';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 import type { EmbedderProvider } from './embedder/embedder-provider.interface';
 import { OpenAIEmbedderProvider } from './embedder/openai-embedder.provider';
 import { BgeM3EmbedderProvider } from './embedder/bge-m3-embedder.provider';
@@ -28,7 +30,10 @@ export class EmbedderService implements OnModuleInit {
   private readonly primary: EmbedderProvider;
   private readonly fallback: EmbedderProvider | null;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     const cacheSize = parseInt(
       this.configService.get<string>('EMBEDDING_CACHE_SIZE', '2000'),
       10,
@@ -74,7 +79,25 @@ export class EmbedderService implements OnModuleInit {
     const key = this.cacheKey(provider.providerId, trimmed);
     const hit = this.cache.get(key);
     if (hit) return hit;
-    const vec = await provider.embed(trimmed);
+    // Provider IDs encode `${vendor}:${model}:${dim}` (see
+    // OpenAIEmbedderProvider / BgeM3EmbedderProvider). We split for
+    // gen_ai.system + gen_ai.request.model; OpenAI is the only vendor
+    // whose API returns usage{total_tokens}, so the metric's token
+    // counter populates only on that branch (BGE is local — no API
+    // tokens to count). Cache hits skip the wrapper entirely so the
+    // metric reflects real API calls, not memoised reads.
+    const [vendor, model] = provider.providerId.split(':');
+    const isOpenAI = vendor === 'openai';
+    const vec = await withGenAiCall(
+      {
+        kind: 'embed',
+        spanName: 'gen_ai.embed',
+        system: isOpenAI ? 'openai' : 'huggingface',
+        model: model ?? '_',
+      },
+      this.metrics,
+      () => provider.embed(trimmed) as Promise<number[]>,
+    );
     this.cache.set(key, vec);
     return vec;
   }

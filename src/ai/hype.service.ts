@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { Semaphore } from '../common/semaphore';
 import { EmbedderService } from './embedder.service';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 
 /**
  * HyPE — Hypothetical Prompt Embeddings.
@@ -31,6 +33,7 @@ export class HypeService {
   constructor(
     private readonly configService: ConfigService,
     private readonly embedder: EmbedderService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     this.enabled =
       this.configService.get<string>('SEARCH_HYPE_ENABLED', '0') === '1';
@@ -106,7 +109,15 @@ The question should:
 - Avoid copying the object text verbatim — paraphrase so the embedding diverges from the literal-object embedding.`;
     const user = `predicate: ${predicate}\nobject: ${object}`;
 
-    const res = await this.openai.chat.completions.create({
+    const res = await withGenAiCall(
+      {
+        kind: 'chat',
+        spanName: 'gen_ai.chat.hype',
+        system: 'openai',
+        model: this.model,
+      },
+      this.metrics,
+      () => this.openai.chat.completions.create({
       model: this.model,
       messages: [
         { role: 'system', content: sys },
@@ -129,7 +140,8 @@ The question should:
       },
       max_completion_tokens: 80,
       temperature: 0,
-    });
+    }),
+    );
     const content = res.choices[0]?.message?.content;
     if (!content) return '';
     try {

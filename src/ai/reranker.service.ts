@@ -1,7 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { Semaphore } from '../common/semaphore';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 
 export interface RerankCandidate {
   /** A short label identifying the candidate (e.g. canonical name). */
@@ -39,7 +41,10 @@ export class RerankerService {
   private readonly limiter: Semaphore;
   private readonly scN: number;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     this.enabled =
       this.configService.get<string>('SEARCH_RERANKER_ENABLED', '0') === '1';
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
@@ -164,7 +169,16 @@ Return ONLY a JSON object of the shape {"ranking": [<index>, ...]} listing every
 
     try {
       const res = await this.limiter.run(() =>
-        this.openai.chat.completions.create({
+        withGenAiCall(
+          {
+            kind: 'chat',
+            spanName: 'gen_ai.chat.reranker',
+            system: 'openai',
+            model: this.model,
+            attrs: { 'brain.rerank.candidates': candidates.length },
+          },
+          this.metrics,
+          () => this.openai.chat.completions.create({
           model: this.model,
           messages: [
             { role: 'system', content: systemPrompt },
@@ -190,7 +204,7 @@ Return ONLY a JSON object of the shape {"ranking": [<index>, ...]} listing every
           },
           max_completion_tokens: 256,
           temperature: 0,
-        }),
+        })),
       );
 
       const content = res.choices[0]?.message?.content;

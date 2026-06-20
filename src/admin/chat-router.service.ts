@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { traceArtifact, traceSpan } from '../common/debug-trace';
 import { clampLlmInputText } from '../common/input-limits';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 import {
   PredicateRegistryService,
   type PredicateSnapshot,
@@ -86,6 +88,7 @@ export class ChatRouterService {
     private readonly embedder: EmbedderService,
     private readonly collapsePatterns: CollapsePatternService,
     private readonly intentClassifier: IntentClassifierService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     this.openai = new OpenAI({
       apiKey: this.config.getOrThrow<string>('OPENAI_API_KEY'),
@@ -367,23 +370,33 @@ message: ${message}`;
       ReturnType<typeof this.openai.chat.completions.create>
     >;
     try {
-      res = await this.openai.chat.completions.create({
-        model: this.model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'chat_route',
-            strict: true,
-            schema: buildSchema(ctx.predicateVocab),
-          },
+      res = await withGenAiCall(
+        {
+          kind: 'chat',
+          spanName: 'gen_ai.chat.chat_router',
+          system: 'openai',
+          model: this.model,
         },
-        temperature: 0,
-        max_completion_tokens: 800,
-      });
+        this.metrics,
+        () =>
+          this.openai.chat.completions.create({
+            model: this.model,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: user },
+            ],
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: 'chat_route',
+                strict: true,
+                schema: buildSchema(ctx.predicateVocab),
+              },
+            },
+            temperature: 0,
+            max_completion_tokens: 800,
+          }),
+      );
     } catch (e) {
       // OpenAI network glitch (Premature close, ETIMEDOUT, 5xx after
       // SDK retries exhausted) MUST NOT bubble up as a 500 to the

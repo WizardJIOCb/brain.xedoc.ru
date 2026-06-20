@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Surreal, StringRecordId } from 'surrealdb';
 import OpenAI from 'openai';
 import { EmbedderService } from '../ai/embedder.service';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 import { Semaphore } from '../common/semaphore';
 import { withSpan } from '../common/tracing';
 
@@ -55,6 +57,7 @@ export class DreamsDedupService {
   constructor(
     private readonly configService: ConfigService,
     private readonly embedder: EmbedderService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     this.enabled =
       this.configService.get<string>('DREAMS_DEDUP_ENABLED', '0') === '1';
@@ -247,7 +250,15 @@ Output strictly the JSON shape requested. No preamble.`;
       `Cosine name-similarity: ${cand.cosine.toFixed(3)}.`;
 
     try {
-      const res = await this.openai.chat.completions.create({
+      const res = await withGenAiCall(
+        {
+          kind: 'chat',
+          spanName: 'gen_ai.chat.dreams_dedup',
+          system: 'openai',
+          model: this.model,
+        },
+        this.metrics,
+        () => this.openai.chat.completions.create({
         model: this.model,
         messages: [
           { role: 'system', content: sys },
@@ -273,7 +284,8 @@ Output strictly the JSON shape requested. No preamble.`;
         },
         max_completion_tokens: 64,
         temperature: 0,
-      });
+      }),
+      );
       const content = res.choices[0]?.message?.content;
       if (!content) return 'unsure';
       const parsed = JSON.parse(content) as { verdict: unknown };

@@ -1,6 +1,7 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { Surreal } from 'surrealdb';
 import { SurrealService, dbMerge } from '../db/surreal.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { RetractFactDto } from './dto/retract.dto';
 
 export interface RetractResult {
@@ -21,7 +22,10 @@ export interface RetractResult {
 export class FactsService {
   private readonly logger = new Logger(FactsService.name);
 
-  constructor(private readonly surreal: SurrealService) {}
+  constructor(
+    private readonly surreal: SurrealService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {}
 
   async retract(
     companyId: string,
@@ -73,6 +77,8 @@ export class FactsService {
       this.logger.log(
         `[knowledge.fact.retracted] companyId=${companyId} factId=${existing.id} cascaded=${cascaded.length} revived=${revived.length}`,
       );
+
+      this.metrics?.countRetract();
 
       return {
         factId: String(existing.id),

@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { Semaphore } from '../common/semaphore';
 import { clampLlmInputText } from '../common/input-limits';
+import { withGenAiCall } from '../common/gen-ai-observability';
+import { MetricsService } from '../metrics/metrics.service';
 
 /**
  * One step in a multi-hop search plan. Produced by the planner LLM
@@ -107,7 +109,10 @@ export class MultiHopPlannerService {
   private readonly model: string;
   private readonly limiter: Semaphore;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     this.openai = new OpenAI({
       apiKey: this.configService.getOrThrow<string>('OPENAI_API_KEY'),
       timeout: parseInt(
@@ -148,7 +153,16 @@ export class MultiHopPlannerService {
     user: string,
     maxHops: number,
   ): Promise<MultiHopPlan | null> {
-    const res = await this.openai.chat.completions.create({
+    const res = await withGenAiCall(
+      {
+        kind: 'chat',
+        spanName: 'gen_ai.chat.multi_hop_planner',
+        system: 'openai',
+        model: this.model,
+        attrs: { 'brain.multi_hop.max_hops': maxHops },
+      },
+      this.metrics,
+      () => this.openai.chat.completions.create({
       model: this.model,
       messages: [
         { role: 'system', content: PLANNER_SYSTEM },
@@ -203,7 +217,8 @@ export class MultiHopPlannerService {
       },
       max_completion_tokens: 768,
       temperature: 0,
-    });
+    }),
+    );
     const content = res.choices[0]?.message?.content;
     if (!content) return null;
     const parsed = JSON.parse(content) as MultiHopPlan;

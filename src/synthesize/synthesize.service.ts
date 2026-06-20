@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import { SearchService, SearchHit } from '../search/search.service';
 import { Semaphore } from '../common/semaphore';
 import { withSpan } from '../common/tracing';
+import { withGenAiCall } from '../common/gen-ai-observability';
 import { clampLlmInputText } from '../common/input-limits';
 import { traceArtifact } from '../common/debug-trace';
 import { MetricsService } from '../metrics/metrics.service';
@@ -369,7 +370,16 @@ export class SynthesizeService {
       model,
       answerLang,
     });
-    const res = await this.openai.chat.completions.create({
+    const res = await withGenAiCall(
+      {
+        kind: 'chat',
+        spanName: 'gen_ai.chat.synthesize_generator',
+        system: 'openai',
+        model,
+        attrs: { 'brain.synthesize.answer_lang': answerLang ?? 'auto' },
+      },
+      this.metrics,
+      () => this.openai.chat.completions.create({
       model,
       messages: [
         { role: 'system', content: GENERATOR_SYSTEM },
@@ -393,7 +403,8 @@ export class SynthesizeService {
       },
       max_completion_tokens: 512,
       temperature: 0,
-    });
+    }),
+    );
     const content = res.choices[0]?.message?.content;
     if (!content) throw new Error('empty generator response');
     const parsed = JSON.parse(content) as GeneratorOutput;
@@ -419,7 +430,15 @@ export class SynthesizeService {
       user,
       model,
     });
-    const res = await this.openai.chat.completions.create({
+    const res = await withGenAiCall(
+      {
+        kind: 'chat',
+        spanName: 'gen_ai.chat.synthesize_verifier',
+        system: 'openai',
+        model,
+      },
+      this.metrics,
+      () => this.openai.chat.completions.create({
       model,
       messages: [
         { role: 'system', content: VERIFIER_SYSTEM },
@@ -449,7 +468,8 @@ export class SynthesizeService {
       },
       max_completion_tokens: 256,
       temperature: 0,
-    });
+    }),
+    );
     const content = res.choices[0]?.message?.content;
     if (!content) throw new Error('empty verifier response');
     const parsed = JSON.parse(content) as VerifierOutput;
