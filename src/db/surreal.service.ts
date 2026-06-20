@@ -35,6 +35,7 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
   private namespace!: string;
   private poolSize!: number;
   private scopedPoolSize!: number;
+  private acquireTimeoutMs!: number;
   private scopedEnabled = false;
   // Track whether we've already overwritten brain_caller's password
   // this process boot for an existing-tenant case. Migrations only
@@ -137,8 +138,18 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
       this.configService.get<string>('SURREALDB_SCOPED_POOL_SIZE', '8'),
       10,
     );
+    this.acquireTimeoutMs = parseInt(
+      this.configService.get<string>('SURREALDB_ACQUIRE_TIMEOUT_MS', '10000'),
+      10,
+    );
     if (!Number.isFinite(this.poolSize) || this.poolSize < 1) {
       throw new Error('SURREALDB_POOL_SIZE must be a positive integer');
+    }
+    if (
+      !Number.isFinite(this.acquireTimeoutMs) ||
+      this.acquireTimeoutMs < 100
+    ) {
+      throw new Error('SURREALDB_ACQUIRE_TIMEOUT_MS must be >= 100ms');
     }
 
     // Cache for re-signin / rebuild on ws drops (see ensureRootSession).
@@ -346,9 +357,11 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
   }
 
   private acquireRoot(): Promise<Surreal> {
-    const free = this.rootIdle.shift();
-    if (free) return Promise.resolve(free);
-    return new Promise<Surreal>((resolve) => this.rootWaiters.push(resolve));
+    return this.acquireWithTimeout(
+      this.rootIdle,
+      this.rootWaiters,
+      'root',
+    );
   }
 
   private releaseRoot(conn: Surreal): void {
@@ -361,9 +374,11 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
   }
 
   private acquireScoped(): Promise<Surreal> {
-    const free = this.scopedIdle.shift();
-    if (free) return Promise.resolve(free);
-    return new Promise<Surreal>((resolve) => this.scopedWaiters.push(resolve));
+    return this.acquireWithTimeout(
+      this.scopedIdle,
+      this.scopedWaiters,
+      'scoped',
+    );
   }
 
   private releaseScoped(conn: Surreal): void {
@@ -373,6 +388,44 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
     } else {
       this.scopedIdle.push(conn);
     }
+  }
+
+  /**
+   * Pool acquire with a hard timeout. Before this guard a waiter
+   * could sit FOREVER if every connection leaked (any code path that
+   * acquired but never released). Now the request fails fast with a
+   * 503-equivalent — operator sees the symptom in /admin/now (slow
+   * requests) and /admin/throttler (5xx rate) instead of a silent
+   * hang.
+   *
+   * Default 10s — chosen to be longer than any legitimate query, but
+   * short enough that a single stuck request doesn't drag the rest
+   * of the tenant. Configurable via SURREALDB_ACQUIRE_TIMEOUT_MS.
+   */
+  private acquireWithTimeout(
+    idle: Surreal[],
+    waiters: Array<(c: Surreal) => void>,
+    label: 'root' | 'scoped',
+  ): Promise<Surreal> {
+    const free = idle.shift();
+    if (free) return Promise.resolve(free);
+    return new Promise<Surreal>((resolve, reject) => {
+      const ms = this.acquireTimeoutMs;
+      const enqueued: (c: Surreal) => void = (c) => {
+        clearTimeout(t);
+        resolve(c);
+      };
+      const t = setTimeout(() => {
+        const i = waiters.indexOf(enqueued);
+        if (i >= 0) waiters.splice(i, 1);
+        reject(
+          new Error(
+            `Surreal ${label} pool acquire timed out after ${ms}ms (pool=${this.poolSize}, waiters=${waiters.length}). Likely a connection leak — check long-running requests in /admin/now.`,
+          ),
+        );
+      }, ms);
+      waiters.push(enqueued);
+    });
   }
 
   /**

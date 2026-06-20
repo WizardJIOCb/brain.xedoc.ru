@@ -10,6 +10,7 @@ import { DreamsResolverService, ResolverResult } from './resolver.service';
 import { CompactionService } from '../compaction/compaction.service';
 import { DreamsOperation } from './dto/run-dreams.dto';
 import { JobRunService, JobRunRow } from '../jobs/job-run.service';
+import { InFlightGuard } from '../common/in-flight-guard';
 
 export interface DreamsTenantStats {
   companyId: string;
@@ -53,6 +54,13 @@ export class DreamsService {
   private readonly logger = new Logger(DreamsService.name);
   private readonly enabled: boolean;
   private readonly defaultOps: ReadonlySet<DreamsOperation>;
+  /**
+   * Reentrancy guard. Keys: 'all' for the cross-tenant runAll path,
+   * `tenant:${companyId}` for per-tenant runs. A long-running runAll
+   * cannot overlap with a manual runForTenant on the same tenant —
+   * that would race RELATE writes in dedup/resolver.
+   */
+  private readonly guard = new InFlightGuard();
 
   constructor(
     private readonly surreal: SurrealService,
@@ -90,7 +98,14 @@ export class DreamsService {
   @Cron('0 4 * * *', { timeZone: 'UTC' })
   async runDaily(): Promise<DreamsTenantStats[]> {
     if (!this.enabled) return [];
-    return this.runAll();
+    const result = await this.guard.run('all', () => this.runAll());
+    if (result === null) {
+      this.logger.warn(
+        'dreams cron skipped — previous runAll still in flight',
+      );
+      return [];
+    }
+    return result;
   }
 
   /**
@@ -145,6 +160,28 @@ export class DreamsService {
    * `manual` / actor) is threaded through from the entry point.
    */
   async runForTenant(
+    companyId: string,
+    operations: DreamsOperation[],
+    triggered?: {
+      triggeredBy?: 'cron' | 'manual' | 'startup';
+      triggeredByActor?: string;
+    },
+  ): Promise<DreamsTenantStats> {
+    const guarded = await this.guard.run(`tenant:${companyId}`, () =>
+      this.runForTenantInner(companyId, operations, triggered),
+    );
+    if (guarded !== null) return guarded;
+    this.logger.warn(
+      `dreams skipped for ${companyId} — previous run still in flight`,
+    );
+    return {
+      companyId,
+      durationSeconds: 0,
+      error: 'skipped: previous run still in flight',
+    };
+  }
+
+  private async runForTenantInner(
     companyId: string,
     operations: DreamsOperation[],
     triggered?: {

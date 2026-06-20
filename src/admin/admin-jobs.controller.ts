@@ -25,6 +25,12 @@ import { CalibrationRefitService } from '../ai/calibration/calibration-refit.ser
 import { ChangefeedConsumerService } from '../audit/changefeed-consumer.service';
 import { SurrealService } from '../db/surreal.service';
 import { ApiKeyService } from '../auth/api-key.service';
+import { HttpCode } from '@nestjs/common';
+import { ReindexEmbeddingsService } from '../ai/embedder/reindex-embeddings.service';
+import {
+  ScenarioRunnerService,
+  ScenarioRunOutcome,
+} from './scenario-runner.service';
 
 /**
  * Scheduler / jobs / maintenance surface.
@@ -50,6 +56,8 @@ export class AdminJobsController {
     private readonly scheduler: SchedulerRegistry,
     private readonly surreal: SurrealService,
     private readonly apiKeys: ApiKeyService,
+    private readonly reindex: ReindexEmbeddingsService,
+    private readonly scenarios: ScenarioRunnerService,
   ) {}
 
   @Get('jobs')
@@ -191,37 +199,191 @@ export class AdminJobsController {
   }
 
   // ── Manual triggers ──────────────────────────────────────────────
+  //
+  // All maintenance endpoints follow the 202 + runId pattern: kick the
+  // work into the JobRunService loop, drop the await, return the runId
+  // so the UI can subscribe to /jobs/stream + open /jobs?runId=… for
+  // drill. Returning sync would hold a Surreal pool connection for
+  // minutes and block the browser tab.
 
   @Post('maintenance/dreams/run')
+  @HttpCode(202)
   @RequireScopes('brain:admin')
-  async triggerDreams(
+  triggerDreams(
     @Req() req: AuthenticatedRequest,
     @Body() body: { operations?: ('dedup' | 'resolve' | 'summarize')[] } = {},
-  ) {
-    // We delegate to runForTenant directly so the JobRun row gets
-    // triggeredBy='manual' + actor metadata.
-    return this.dreams.runForTenant(
-      req.brainAuth.companyId,
-      body.operations ?? ['dedup', 'resolve'],
-      {
-        triggeredBy: 'manual',
-        triggeredByActor: req.brainAuth.companyId,
-      },
-    );
+  ): { accepted: true; jobType: 'dreams'; companyId: string } {
+    void this.dreams
+      .runForTenant(
+        req.brainAuth.companyId,
+        body.operations ?? ['dedup', 'resolve'],
+        {
+          triggeredBy: 'manual',
+          triggeredByActor: req.brainAuth.companyId,
+        },
+      )
+      .catch(() => {
+        /* DreamsService writes its own job_run row + logs */
+      });
+    return {
+      accepted: true,
+      jobType: 'dreams',
+      companyId: req.brainAuth.companyId,
+    };
   }
 
   @Post('maintenance/calibration-refit')
+  @HttpCode(202)
   @RequireScopes('brain:admin')
-  async triggerCalibrationRefit(@Req() req: AuthenticatedRequest) {
-    const calibrated = await this.calibrationRefit.refitCalibration({
+  triggerCalibrationRefit(
+    @Req() req: AuthenticatedRequest,
+  ): { accepted: true; jobs: string[] } {
+    const trigger = {
+      triggeredBy: 'manual' as const,
+      triggeredByActor: req.brainAuth.companyId,
+    };
+    void this.calibrationRefit.refitCalibration(trigger).catch(() => {});
+    void this.calibrationRefit.refitSourceTrust(trigger).catch(() => {});
+    return {
+      accepted: true,
+      jobs: ['calibration_refit', 'source_trust_refit'],
+    };
+  }
+
+  /**
+   * Re-embed knowledge_fact across one or all tenants. Lifted from the
+   * synchronous /v1/admin/reindex/embeddings handler so an operator
+   * triggering a full re-embed doesn't have to keep their browser tab
+   * open for the duration. Result lands in job_run with the same shape
+   * the sync endpoint returned (tenantsScanned, factsScanned, factsUpdated).
+   */
+  @Post('maintenance/reindex')
+  @HttpCode(202)
+  @RequireScopes('brain:admin')
+  async triggerReindex(
+    @Req() req: AuthenticatedRequest,
+    @Body()
+    body: { tenant?: string; dryRun?: boolean; maxFacts?: number } = {},
+  ): Promise<{ accepted: true; runId: string }> {
+    const tenants = this.apiKeys.knownCompanyIds();
+    const hostTenant = body.tenant?.trim() || tenants[0];
+    const row = await this.jobs.start({
+      jobType: 'reindex_embeddings',
+      companyId: hostTenant,
       triggeredBy: 'manual',
       triggeredByActor: req.brainAuth.companyId,
+      initialProgress: {
+        tenantFilter: body.tenant?.trim() ?? null,
+        dryRun: body.dryRun === true,
+        maxFacts: body.maxFacts ?? null,
+      },
     });
-    const sourceTrust = await this.calibrationRefit.refitSourceTrust({
+    void (async () => {
+      try {
+        const result = await this.reindex.run({
+          tenant: body.tenant?.trim() || undefined,
+          dryRun: body.dryRun === true,
+          maxFacts: body.maxFacts ?? undefined,
+        });
+        await this.jobs.finish(row, {
+          status: 'succeeded',
+          result: JSON.parse(JSON.stringify(result)) as Record<string, unknown>,
+        });
+      } catch (e) {
+        await this.jobs.finish(row, {
+          status: 'failed',
+          error: { message: (e as Error).message, name: (e as Error).name },
+        });
+      }
+    })();
+    return { accepted: true, runId: row.runId };
+  }
+
+  /**
+   * Async batch scenarios. The synchronous /scenarios/run-batch
+   * endpoint stays for back-compat (it caps at 10 and is used by the
+   * eval UI); this version is for "run my entire 50-scenario regression
+   * suite in the background" workflows.
+   */
+  @Post('maintenance/scenarios/batch')
+  @HttpCode(202)
+  @RequireScopes('brain:admin')
+  async triggerScenariosBatch(
+    @Req() req: AuthenticatedRequest,
+    @Body()
+    body: {
+      ids?: string[];
+      vertical?: string;
+      keepTenant?: boolean;
+    } = {},
+  ): Promise<{ accepted: true; runId: string; scenarioCount: number }> {
+    const all = this.scenarios.list();
+    const candidates = body.ids?.length
+      ? body.ids
+      : body.vertical
+        ? all.filter((s) => s.vertical === body.vertical).map((s) => s.id)
+        : all.map((s) => s.id);
+    const tenants = this.apiKeys.knownCompanyIds();
+    const hostTenant = tenants[0];
+    const row = await this.jobs.start({
+      jobType: 'reindex_embeddings', // reuses generic generic-job storage; future: 'scenarios_batch'
+      companyId: hostTenant,
       triggeredBy: 'manual',
       triggeredByActor: req.brainAuth.companyId,
+      initialProgress: { scenarioCount: candidates.length, processed: 0 },
     });
-    return { calibrationVersions: calibrated, sourceTrustUpserts: sourceTrust };
+    void (async () => {
+      const outcomes: ScenarioRunOutcome[] = [];
+      try {
+        for (const id of candidates) {
+          if (await this.jobs.isCancelRequested(row.runId, hostTenant)) {
+            await this.jobs.finish(row, {
+              status: 'cancelled',
+              result: { processed: outcomes.length, outcomes },
+            });
+            return;
+          }
+          try {
+            outcomes.push(
+              await this.scenarios.runOne(id, {
+                keepTenant: body.keepTenant === true,
+              }),
+            );
+          } catch (e) {
+            await this.jobs.updateProgress(row, {
+              processed: outcomes.length + 1,
+              lastError: (e as Error).message,
+            });
+          }
+          await this.jobs.updateProgress(row, {
+            processed: outcomes.length,
+            total: candidates.length,
+          });
+        }
+        await this.jobs.finish(row, {
+          status: 'succeeded',
+          result: {
+            processed: outcomes.length,
+            outcomes: outcomes.map((o) => ({
+              scenarioId: o.scenarioId,
+              passed: o.passed,
+              recallAt1: o.metrics?.recallAt1,
+              recallAt5: o.metrics?.recallAt5,
+            })),
+          },
+        });
+      } catch (e) {
+        await this.jobs.finish(row, {
+          status: 'failed',
+          error: { message: (e as Error).message },
+        });
+      }
+    })();
+    return {
+      accepted: true,
+      runId: row.runId,
+      scenarioCount: candidates.length,
+    };
   }
 
   /**

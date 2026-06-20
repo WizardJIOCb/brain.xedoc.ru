@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ApiKeyService } from '../auth/api-key.service';
 import { SurrealService } from '../db/surreal.service';
 import { MetricsService } from '../metrics/metrics.service';
+import { mapWithLimit } from '../common/parallel';
+
+/** Per-tenant fan-out concurrency for admin cross-tenant reads. */
+const TENANT_FANOUT = 4;
 
 export interface AdminTenantRow {
   companyId: string;
@@ -137,26 +141,37 @@ export class AdminService {
     let forgotten24h = 0;
     const dayAgoIso = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
 
-    for (const companyId of tenants) {
-      try {
-        const tenantData = await this.collectTenant(companyId, dayAgoIso);
-        rows.push(tenantData.row);
-        recentDeadLetter.push(...tenantData.deadLetter);
-        recentForgotten.push(...tenantData.forgotten);
-        deadLetter24h += tenantData.deadLetter24h;
-        forgotten24h += tenantData.forgotten24h;
-      } catch (e) {
-        this.logger.warn(
-          `Failed to collect admin overview for ${companyId}: ${(e as Error).message}`,
-        );
+    // Parallel fan-out — sequential was N × per-tenant-Surreal-RTT which
+    // turned the overview into a 5s+ page under 20 tenants. Cap at
+    // TENANT_FANOUT so we don't drain the Surreal pool either.
+    const tenantResults = await mapWithLimit(
+      tenants,
+      TENANT_FANOUT,
+      (companyId) => this.collectTenant(companyId, dayAgoIso),
+      {
+        onError: (err, companyId) =>
+          this.logger.warn(
+            `Failed to collect admin overview for ${companyId}: ${err.message}`,
+          ),
+      },
+    );
+    tenants.forEach((companyId, i) => {
+      const data = tenantResults[i];
+      if (!data) {
         rows.push({
           companyId,
           entities: -1,
           factsActive: -1,
           factsRetracted: -1,
         });
+        return;
       }
-    }
+      rows.push(data.row);
+      recentDeadLetter.push(...data.deadLetter);
+      recentForgotten.push(...data.forgotten);
+      deadLetter24h += data.deadLetter24h;
+      forgotten24h += data.forgotten24h;
+    });
 
     // Sort recent lists across tenants, keep last 20.
     recentDeadLetter.sort((a, b) => b.rejectedAt.localeCompare(a.rejectedAt));
@@ -386,8 +401,10 @@ export class AdminService {
       params.reason = filter.reason;
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    for (const companyId of tenants) {
-      try {
+    const perTenant = await mapWithLimit(
+      tenants,
+      TENANT_FANOUT,
+      async (companyId) => {
         const rows = await this.surreal.withCompany(companyId, async (db) => {
           const res = (await db.query<any[]>(
             `SELECT id, reason, rejectedAt, payload
@@ -397,20 +414,23 @@ export class AdminService {
           )) as any[];
           return (res[0] ?? []) as any[];
         });
-        for (const r of rows) {
-          out.push({
-            companyId,
-            id: String(r.id),
-            reason: r.reason,
-            rejectedAt: new Date(r.rejectedAt).toISOString(),
-            payload: r.payload ?? {},
-          });
-        }
-      } catch (e) {
-        this.logger.warn(
-          `dead-letter list failed for ${companyId}: ${(e as Error).message}`,
-        );
-      }
+        return rows.map((r) => ({
+          companyId,
+          id: String(r.id),
+          reason: r.reason,
+          rejectedAt: new Date(r.rejectedAt).toISOString(),
+          payload: r.payload ?? {},
+        }));
+      },
+      {
+        onError: (err, companyId) =>
+          this.logger.warn(
+            `dead-letter list failed for ${companyId}: ${err.message}`,
+          ),
+      },
+    );
+    for (const batch of perTenant) {
+      if (batch) out.push(...batch);
     }
     out.sort((a, b) => b.rejectedAt.localeCompare(a.rejectedAt));
     return out.slice(0, limit);
@@ -464,8 +484,10 @@ export class AdminService {
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const out: AdminForgottenRow[] = [];
-    for (const companyId of tenants) {
-      try {
+    const perTenant = await mapWithLimit(
+      tenants,
+      TENANT_FANOUT,
+      async (companyId) => {
         const rows = await this.surreal.withCompany(companyId, async (db) => {
           const res = (await db.query<any[]>(
             `SELECT entityIdHash, reason, forgottenAt, factsDeleted, edgesDeleted
@@ -475,21 +497,24 @@ export class AdminService {
           )) as any[];
           return (res[0] ?? []) as any[];
         });
-        for (const r of rows) {
-          out.push({
-            companyId,
-            entityIdHash: r.entityIdHash,
-            reason: r.reason,
-            forgottenAt: new Date(r.forgottenAt).toISOString(),
-            factsDeleted: r.factsDeleted ?? 0,
-            edgesDeleted: r.edgesDeleted ?? 0,
-          });
-        }
-      } catch (e) {
-        this.logger.warn(
-          `forgotten list failed for ${companyId}: ${(e as Error).message}`,
-        );
-      }
+        return rows.map((r) => ({
+          companyId,
+          entityIdHash: r.entityIdHash,
+          reason: r.reason,
+          forgottenAt: new Date(r.forgottenAt).toISOString(),
+          factsDeleted: r.factsDeleted ?? 0,
+          edgesDeleted: r.edgesDeleted ?? 0,
+        }));
+      },
+      {
+        onError: (err, companyId) =>
+          this.logger.warn(
+            `forgotten list failed for ${companyId}: ${err.message}`,
+          ),
+      },
+    );
+    for (const batch of perTenant) {
+      if (batch) out.push(...batch);
     }
     out.sort((a, b) => b.forgottenAt.localeCompare(a.forgottenAt));
     return out.slice(0, limit);
@@ -602,8 +627,10 @@ export class AdminService {
       ? `WHERE ${whereClauses.join(' AND ')}`
       : '';
 
-    for (const companyId of tenants) {
-      try {
+    const perTenant = await mapWithLimit(
+      tenants,
+      TENANT_FANOUT,
+      async (companyId) => {
         const rows = await this.surreal.withCompany(companyId, async (db) => {
           const sql = `
             SELECT id, source, recordId, op, ts, versionstamp, before, after, consumedBy
@@ -613,29 +640,36 @@ export class AdminService {
           const out = (await db.query<any[]>(sql, bindings)) as any[];
           return (out[0] ?? []) as any[];
         });
-        for (const r of rows) {
-          const ts = new Date(r.ts).toISOString();
-          events.push({
+        return rows.map((r) => ({
+          row: {
             id: String(r.id),
             companyId,
-            source: r.source,
-            recordId: r.recordId,
-            op: r.op,
-            ts,
+            source: r.source as string,
+            recordId: r.recordId as string,
+            op: r.op as string,
+            ts: new Date(r.ts).toISOString(),
             versionstamp: Number(r.versionstamp ?? 0),
-            before: r.before ?? null,
-            after: r.after ?? null,
-            consumedBy: r.consumedBy ?? 'changefeed-consumer',
-          });
-          totalsBySource[r.source] = (totalsBySource[r.source] ?? 0) + 1;
-          totalsByOp[r.op] = (totalsByOp[r.op] ?? 0) + 1;
-          const hour = ts.slice(0, 13);
-          hourlyBuckets.set(hour, (hourlyBuckets.get(hour) ?? 0) + 1);
-        }
-      } catch (e) {
-        this.logger.warn(
-          `listAuditEvents failed for ${companyId}: ${(e as Error).message}`,
-        );
+            before: (r.before ?? null) as Record<string, unknown> | null,
+            after: (r.after ?? null) as Record<string, unknown> | null,
+            consumedBy: (r.consumedBy ?? 'changefeed-consumer') as string,
+          },
+        }));
+      },
+      {
+        onError: (err, companyId) =>
+          this.logger.warn(
+            `listAuditEvents failed for ${companyId}: ${err.message}`,
+          ),
+      },
+    );
+    for (const batch of perTenant) {
+      if (!batch) continue;
+      for (const { row } of batch) {
+        events.push(row);
+        totalsBySource[row.source] = (totalsBySource[row.source] ?? 0) + 1;
+        totalsByOp[row.op] = (totalsByOp[row.op] ?? 0) + 1;
+        const hour = row.ts.slice(0, 13);
+        hourlyBuckets.set(hour, (hourlyBuckets.get(hour) ?? 0) + 1);
       }
     }
 

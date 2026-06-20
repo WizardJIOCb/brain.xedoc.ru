@@ -10,6 +10,7 @@ import {
 } from './isotonic';
 import { CalibrationService } from './calibration.service';
 import { JobRunService } from '../../jobs/job-run.service';
+import { InFlightGuard } from '../../common/in-flight-guard';
 
 /**
  * Phase 3.5 — nightly refit + source-trust recalculation.
@@ -45,6 +46,13 @@ export class CalibrationRefitService {
   private readonly enabled: boolean;
   private readonly extractorModel: string;
   private readonly bootstrapPromptKey = 'bootstrap';
+  /**
+   * Two sub-jobs (source-trust at 03:42, calibration at 03:51) share
+   * one guard so the second tick can't start while the first is still
+   * draining a huge tenant — and the manual trigger from
+   * /admin/maintenance/calibration-refit can't overlap with either.
+   */
+  private readonly guard = new InFlightGuard();
 
   constructor(
     private readonly surreal: SurrealService,
@@ -79,6 +87,22 @@ export class CalibrationRefitService {
   // ── Source-trust pass ────────────────────────────────────────────
 
   async refitSourceTrust(
+    trigger?: {
+      triggeredBy?: 'cron' | 'manual' | 'startup';
+      triggeredByActor?: string;
+    },
+  ): Promise<number> {
+    const guarded = await this.guard.run('source_trust', () =>
+      this.refitSourceTrustInner(trigger),
+    );
+    if (guarded === null) {
+      this.logger.warn('source-trust refit skipped — already in flight');
+      return 0;
+    }
+    return guarded;
+  }
+
+  private async refitSourceTrustInner(
     trigger?: {
       triggeredBy?: 'cron' | 'manual' | 'startup';
       triggeredByActor?: string;
@@ -200,6 +224,22 @@ export class CalibrationRefitService {
   // ── Calibration pass ─────────────────────────────────────────────
 
   async refitCalibration(
+    trigger?: {
+      triggeredBy?: 'cron' | 'manual' | 'startup';
+      triggeredByActor?: string;
+    },
+  ): Promise<number> {
+    const guarded = await this.guard.run('calibration', () =>
+      this.refitCalibrationInner(trigger),
+    );
+    if (guarded === null) {
+      this.logger.warn('calibration refit skipped — already in flight');
+      return 0;
+    }
+    return guarded;
+  }
+
+  private async refitCalibrationInner(
     trigger?: {
       triggeredBy?: 'cron' | 'manual' | 'startup';
       triggeredByActor?: string;

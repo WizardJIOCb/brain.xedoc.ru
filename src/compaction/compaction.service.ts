@@ -75,11 +75,29 @@ export class CompactionService {
     );
   }
 
-  /** Cron entry — daily at 03:17 UTC, off-peak for most regions. */
+  /**
+   * Cron entry — daily at 03:17 UTC, off-peak for most regions.
+   *
+   * Reentrancy: a manual /v1/admin/maintenance/compaction trigger (if
+   * we add one) MUST NOT overlap with the cron. Compaction rewrites
+   * fact status in place; two concurrent passes would re-compact
+   * already-compacted rows and double-bill summary generation.
+   */
   @Cron('17 3 * * *', { timeZone: 'UTC' })
   async runDaily(): Promise<CompactionStats[]> {
-    return this.compactAll();
+    if (this.compactionInFlight) {
+      this.logger.warn('compaction cron skipped — previous run still in flight');
+      return [];
+    }
+    this.compactionInFlight = true;
+    try {
+      return await this.compactAll();
+    } finally {
+      this.compactionInFlight = false;
+    }
   }
+
+  private compactionInFlight = false;
 
   /**
    * Compact every known tenant. Errors per-tenant are logged; one bad
