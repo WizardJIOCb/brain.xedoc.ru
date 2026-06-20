@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SurrealService } from '../db/surreal.service';
+import { LRUCache } from '../common/lru-cache';
 
 /**
  * Per-tenant learned cache of state-change collapse patterns.
@@ -37,12 +39,24 @@ const SNAPSHOT_TTL_MS = 60_000;
 @Injectable()
 export class CollapsePatternService {
   private readonly logger = new Logger(CollapsePatternService.name);
-  private readonly cache = new Map<
+  // LRU-bounded per-tenant snapshot. See the audit's "P1 — unbounded
+  // per-tenant Maps" finding — without the cap the cache grew linearly
+  // with the lifetime tenant count of the process.
+  private readonly cache: LRUCache<
     string,
     { snapshot: CollapseSnapshot; loadedAt: number }
-  >();
+  >;
 
-  constructor(private readonly surreal: SurrealService) {}
+  constructor(
+    private readonly surreal: SurrealService,
+    private readonly config: ConfigService,
+  ) {
+    const cap = parseInt(
+      this.config.get<string>('COLLAPSE_PATTERN_CACHE_CAP', '200'),
+      10,
+    );
+    this.cache = new LRUCache(cap);
+  }
 
   async getSnapshot(companyId: string): Promise<CollapseSnapshot> {
     const cached = this.cache.get(companyId);

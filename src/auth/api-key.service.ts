@@ -30,7 +30,19 @@ export class ApiKeyService implements OnModuleInit {
       if (!k.keyHash || !k.companyId || !Array.isArray(k.scopes)) {
         throw new Error('BRAIN_API_KEYS entry missing required fields (keyHash, companyId, scopes)');
       }
-      this.byHash.set(k.keyHash.toLowerCase(), k);
+      // Hash shape MUST match the convention `static hash()` emits —
+      // `sha256:` + 64 hex chars. A misconfigured operator entry
+      // (e.g. accidentally pasting the plaintext key in keyHash, or a
+      // truncated digest) silently never matches at request time and
+      // looks identical to a real-but-unknown caller. Fail at boot
+      // instead so the misconfiguration surfaces immediately.
+      const normalised = k.keyHash.toLowerCase();
+      if (!/^sha256:[0-9a-f]{64}$/.test(normalised)) {
+        throw new Error(
+          `BRAIN_API_KEYS entry has malformed keyHash (expected 'sha256:' + 64 hex chars): companyId=${k.companyId}`,
+        );
+      }
+      this.byHash.set(normalised, k);
     }
     this.logger.log(`Loaded ${this.byHash.size} ApiKey(s)`);
   }

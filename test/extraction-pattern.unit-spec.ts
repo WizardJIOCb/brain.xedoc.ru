@@ -13,6 +13,12 @@ interface MockedSurrealService {
   withCompany<T>(companyId: string, fn: (db: Surreal) => Promise<T>): Promise<T>;
 }
 
+// Minimal ConfigService stub — the service only reads
+// EXTRACTION_PATTERN_CACHE_CAP at boot.
+const stubConfig = {
+  get: (_k: string, def: string) => def,
+} as never;
+
 function mkSurreal(seedRows: Array<Record<string, unknown>> = []): {
   service: MockedSurrealService;
   upserts: Array<{ sql: string; params: Record<string, unknown> | undefined }>;
@@ -41,7 +47,7 @@ function mkSurreal(seedRows: Array<Record<string, unknown>> = []): {
 describe('ExtractionPatternService', () => {
   it('returns undefined on cold cache lookup', async () => {
     const { service } = mkSurreal();
-    const svc = new ExtractionPatternService(service as never);
+    const svc = new ExtractionPatternService(service as never, stubConfig);
     const hit = await svc.lookup('demo', 'Maria is the CTO at Acme');
     expect(hit).toBeUndefined();
   });
@@ -63,7 +69,7 @@ describe('ExtractionPatternService', () => {
         ],
       },
     ]);
-    const svc = new ExtractionPatternService(service as never);
+    const svc = new ExtractionPatternService(service as never, stubConfig);
     // Lookup uses different casing — should still hit (normalised).
     const hit = await svc.lookup('demo', '  MARIA IS THE CTO AT ACME  ');
     expect(hit).toBeDefined();
@@ -73,7 +79,7 @@ describe('ExtractionPatternService', () => {
 
   it('record() upserts an entry per clause', async () => {
     const { service, upserts } = mkSurreal();
-    const svc = new ExtractionPatternService(service as never);
+    const svc = new ExtractionPatternService(service as never, stubConfig);
     await svc.record('demo', [
       {
         clauseText: 'Maria is the CTO at Acme',
@@ -99,7 +105,7 @@ describe('ExtractionPatternService', () => {
 
   it('record() skips empty clause text', async () => {
     const { service, upserts } = mkSurreal();
-    const svc = new ExtractionPatternService(service as never);
+    const svc = new ExtractionPatternService(service as never, stubConfig);
     await svc.record('demo', [
       {
         clauseText: '   ',
@@ -118,7 +124,7 @@ describe('ExtractionPatternService', () => {
         edges: [],
       },
     ]);
-    const svc = new ExtractionPatternService(service as never);
+    const svc = new ExtractionPatternService(service as never, stubConfig);
     await svc.lookup('demo', 'foo'); // populate snapshot
     svc.invalidate('demo');
     // No assertion needed beyond not-throwing — invalidate is fire-and-forget.

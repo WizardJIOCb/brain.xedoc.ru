@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SurrealService } from '../db/surreal.service';
+import { LRUCache } from '../common/lru-cache';
 
 /**
  * Per-tenant learned cache of (clauseText → emitted facts + edges).
@@ -45,12 +47,27 @@ const SNAPSHOT_TTL_MS = 60_000;
 @Injectable()
 export class ExtractionPatternService {
   private readonly logger = new Logger(ExtractionPatternService.name);
-  private readonly snapshotCache = new Map<
+  // LRU-bounded per-tenant snapshot cache. An unbounded Map grows
+  // linearly with the lifetime tenant count of the process — each
+  // snapshot can carry a few hundred normalised-clause → pattern
+  // entries, and the cache previously had no eviction. Default
+  // capacity is conservative (200 hot tenants), env-tunable via
+  // EXTRACTION_PATTERN_CACHE_CAP.
+  private readonly snapshotCache: LRUCache<
     string,
     { entries: Map<string, ExtractionPatternEntry>; loadedAt: number }
-  >();
+  >;
 
-  constructor(private readonly surreal: SurrealService) {}
+  constructor(
+    private readonly surreal: SurrealService,
+    private readonly config: ConfigService,
+  ) {
+    const cap = parseInt(
+      this.config.get<string>('EXTRACTION_PATTERN_CACHE_CAP', '200'),
+      10,
+    );
+    this.snapshotCache = new LRUCache(cap);
+  }
 
   /** Lowercase + NFC the clause text for natural-key matching. */
   private normalise(clauseText: string): string {

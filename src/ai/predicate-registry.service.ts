@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { SurrealService } from '../db/surreal.service';
 import { EmbedderService } from './embedder.service';
 import { cosineSimilarity } from '../common/vector-math';
+import { LRUCache } from '../common/lru-cache';
 
 import {
   type CanonicalizeDecision,
@@ -46,13 +47,28 @@ export { CORE_PREDICATES } from './predicate-registry-internals/core-seed';
 @Injectable()
 export class PredicateRegistryService {
   private readonly logger = new Logger(PredicateRegistryService.name);
-  /** Per-tenant snapshot cache. Keyed by companyId. */
-  private readonly cache = new Map<
+  /**
+   * Per-tenant snapshot cache. Keyed by companyId. Bounded by an LRU to
+   * cap memory in fleets that touch many tenants per process — each
+   * snapshot carries up to ~25 predicate embeddings (~300 KB/tenant
+   * at 1536 dims), so 1000+ tenants on an unbounded Map starves the
+   * heap. Default capacity is conservative (200); operators can lift
+   * via PREDICATE_REGISTRY_CACHE_CAP when running fewer, hotter
+   * tenants.
+   */
+  private readonly cache: LRUCache<
     string,
     { snapshot: PredicateSnapshot; loadedAt: number }
-  >();
-  /** Per-tenant bootstrap flag — ensureBootstrap runs once per process per tenant. */
-  private readonly bootstrapped = new Set<string>();
+  >;
+  /**
+   * Per-tenant bootstrap flag — ensureBootstrap runs once per process
+   * per tenant. Bounded so a fleet rotating through thousands of
+   * tenants doesn't grow this set unboundedly either. Eviction is
+   * harmless: ensureBootstrap is idempotent (SELECT + INSERT-IF-MISSING
+   * pattern); an evicted tenant just re-checks the predicate table the
+   * next time it touches the registry.
+   */
+  private readonly bootstrapped: LRUCache<string, true>;
 
   private readonly canonicalizeThreshold: number;
 
@@ -67,6 +83,12 @@ export class PredicateRegistryService {
         String(DEFAULT_CANONICALIZE_AUTO_ALIAS_THRESHOLD),
       ),
     );
+    const cap = parseInt(
+      this.config.get<string>('PREDICATE_REGISTRY_CACHE_CAP', '200'),
+      10,
+    );
+    this.cache = new LRUCache(cap);
+    this.bootstrapped = new LRUCache(cap);
   }
 
   /**
@@ -153,7 +175,7 @@ export class PredicateRegistryService {
         }
       }
     });
-    this.bootstrapped.add(companyId);
+    this.bootstrapped.set(companyId, true);
   }
 
   /**
