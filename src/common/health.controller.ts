@@ -1,10 +1,24 @@
-import { Controller, Get } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { SurrealService } from '../db/surreal.service';
+import { EmbedderService } from '../ai/embedder.service';
 
 @Controller()
 export class HealthController {
-  constructor(private readonly surreal: SurrealService) {}
+  constructor(
+    private readonly surreal: SurrealService,
+    private readonly embedder: EmbedderService,
+  ) {}
 
+  // Liveness — answers true as soon as Nest is up, so the container
+  // is considered alive while warmups (BGE-M3, local NER, intent
+  // classifier) are still resolving in the background. The compose
+  // healthcheck uses this.
   @Get('health')
   async health() {
     const dbOk = await this.surreal.ping().catch(() => false);
@@ -16,6 +30,32 @@ export class HealthController {
       checks: {
         surrealdb: dbOk ? 'ok' : 'unreachable',
       },
+    };
+  }
+
+  // Readiness — answers true only when the request-path dependencies
+  // are warm enough to take production traffic. Split from /health so
+  // a load balancer (or k8s readinessProbe) can hold traffic off while
+  // the local embedder is downloading ONNX weights on first boot,
+  // without the container looking unhealthy + getting recycled by the
+  // liveness probe. Returns 503 when not ready.
+  @Get('ready')
+  @HttpCode(HttpStatus.OK)
+  async ready() {
+    const dbOk = await this.surreal.ping().catch(() => false);
+    const embedderReady = this.embedder.isReady();
+    if (!dbOk || !embedderReady) {
+      throw new ServiceUnavailableException({
+        ready: false,
+        checks: {
+          surrealdb: dbOk ? 'ok' : 'unreachable',
+          embedder: embedderReady ? 'ok' : 'warming',
+        },
+      });
+    }
+    return {
+      ready: true,
+      checks: { surrealdb: 'ok', embedder: 'ok' },
     };
   }
 }

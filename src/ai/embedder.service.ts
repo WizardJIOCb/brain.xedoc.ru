@@ -59,9 +59,36 @@ export class EmbedderService implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    // Fire-and-forget. The audit flagged this as P0: awaiting BGE-M3's
+    // warmup here blocked NestFactory.create until the ~340 MB ONNX
+    // pull + initial inference completed (10s warm cache, >60s cold).
+    // Liveness then SIGKILL'd the container before /health could
+    // answer, so a one-line `EMBEDDER_PROVIDER=bge-m3` flip bricked
+    // the rollout. Now the primary stays "not ready" until warmup
+    // resolves; `activeProvider()` routes to the OpenAI fallback in
+    // the meantime, and `/ready` (HealthController) waits for the
+    // primary to flip ready before reporting up.
     if (this.primary instanceof BgeM3EmbedderProvider) {
-      await this.primary.warmup();
+      void this.primary
+        .warmup()
+        .catch((e) =>
+          this.logger.warn(
+            `bge-m3 warmup failed, falling back to openai: ${(e as Error).message}`,
+          ),
+        );
     }
+  }
+
+  /**
+   * `/ready` probe. Up = the primary embedder is ready OR there's a
+   * fallback the request path can use. We never report "not ready"
+   * when an openai fallback is wired, because the service is in fact
+   * able to serve search/synthesize traffic on the fallback.
+   */
+  isReady(): boolean {
+    if (this.primary.isReady()) return true;
+    if (this.fallback && this.fallback.isReady()) return true;
+    return false;
   }
 
   /**
