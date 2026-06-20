@@ -366,6 +366,201 @@ export class AdminService {
   }
 
   /**
+   * Full DLQ listing with filter + pagination. Used by /admin/dlq
+   * page; the overview already shows last 20.
+   */
+  async listDeadLetter(filter: {
+    companyId?: string;
+    reason?: string;
+    limit?: number;
+  }): Promise<AdminDeadLetterRow[]> {
+    const tenants = filter.companyId
+      ? [filter.companyId]
+      : this.apiKeys.knownCompanyIds();
+    const limit = Math.min(Math.max(filter.limit ?? 200, 1), 1000);
+    const out: AdminDeadLetterRow[] = [];
+    const where: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filter.reason) {
+      where.push('reason = $reason');
+      params.reason = filter.reason;
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    for (const companyId of tenants) {
+      try {
+        const rows = await this.surreal.withCompany(companyId, async (db) => {
+          const res = (await db.query<any[]>(
+            `SELECT id, reason, rejectedAt, payload
+               FROM ingest_dead_letter ${whereSql}
+              ORDER BY rejectedAt DESC LIMIT ${limit}`,
+            params,
+          )) as any[];
+          return (res[0] ?? []) as any[];
+        });
+        for (const r of rows) {
+          out.push({
+            companyId,
+            id: String(r.id),
+            reason: r.reason,
+            rejectedAt: new Date(r.rejectedAt).toISOString(),
+            payload: r.payload ?? {},
+          });
+        }
+      } catch (e) {
+        this.logger.warn(
+          `dead-letter list failed for ${companyId}: ${(e as Error).message}`,
+        );
+      }
+    }
+    out.sort((a, b) => b.rejectedAt.localeCompare(a.rejectedAt));
+    return out.slice(0, limit);
+  }
+
+  /**
+   * Permanently delete a dead-letter row. Reversible only via DB
+   * backup. Caller should already have confirmed at the UI layer.
+   */
+  async deleteDeadLetter(companyId: string, id: string): Promise<boolean> {
+    try {
+      return await this.surreal.withCompany(companyId, async (db) => {
+        const res = (await db.query<any[]>(
+          `DELETE ingest_dead_letter WHERE id = $id RETURN BEFORE`,
+          { id },
+        )) as any[];
+        const rows = (res[0] ?? []) as any[];
+        return rows.length > 0;
+      });
+    } catch (e) {
+      this.logger.warn(
+        `dead-letter delete failed (${companyId}/${id}): ${(e as Error).message}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Full forgotten-entities list with filter. Used by /admin/forgotten
+   * page; also drives the GDPR export endpoint.
+   */
+  async listForgotten(filter: {
+    companyId?: string;
+    reason?: string;
+    since?: string;
+    limit?: number;
+  }): Promise<AdminForgottenRow[]> {
+    const tenants = filter.companyId
+      ? [filter.companyId]
+      : this.apiKeys.knownCompanyIds();
+    const limit = Math.min(Math.max(filter.limit ?? 200, 1), 2000);
+    const where: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filter.reason) {
+      where.push('reason = $reason');
+      params.reason = filter.reason;
+    }
+    if (filter.since) {
+      where.push('forgottenAt >= type::datetime($since)');
+      params.since = filter.since;
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const out: AdminForgottenRow[] = [];
+    for (const companyId of tenants) {
+      try {
+        const rows = await this.surreal.withCompany(companyId, async (db) => {
+          const res = (await db.query<any[]>(
+            `SELECT entityIdHash, reason, forgottenAt, factsDeleted, edgesDeleted
+               FROM forgotten_entity ${whereSql}
+              ORDER BY forgottenAt DESC LIMIT ${limit}`,
+            params,
+          )) as any[];
+          return (res[0] ?? []) as any[];
+        });
+        for (const r of rows) {
+          out.push({
+            companyId,
+            entityIdHash: r.entityIdHash,
+            reason: r.reason,
+            forgottenAt: new Date(r.forgottenAt).toISOString(),
+            factsDeleted: r.factsDeleted ?? 0,
+            edgesDeleted: r.edgesDeleted ?? 0,
+          });
+        }
+      } catch (e) {
+        this.logger.warn(
+          `forgotten list failed for ${companyId}: ${(e as Error).message}`,
+        );
+      }
+    }
+    out.sort((a, b) => b.forgottenAt.localeCompare(a.forgottenAt));
+    return out.slice(0, limit);
+  }
+
+  /**
+   * Cross-tenant PII inventory: for each tenant, count facts grouped
+   * by piiClass (derived from the predicate's requiresScope) so an
+   * operator sees "how many sensitive rows do we hold for tenant X?"
+   * Drives the /admin/pii page.
+   */
+  async listPiiInventory(): Promise<
+    Array<{
+      companyId: string;
+      predicate: string;
+      piiClass: string;
+      requiresScope: string;
+      factCount: number;
+      retractedCount: number;
+    }>
+  > {
+    const tenants = this.apiKeys.knownCompanyIds();
+    const out: Array<{
+      companyId: string;
+      predicate: string;
+      piiClass: string;
+      requiresScope: string;
+      factCount: number;
+      retractedCount: number;
+    }> = [];
+    for (const companyId of tenants) {
+      try {
+        const rows = await this.surreal.withCompany(companyId, async (db) => {
+          const res = (await db.query<any[]>(
+            `SELECT predicateId, piiClass, requiresScope FROM knowledge_predicate
+              WHERE piiClass != 'none'`,
+          )) as any[];
+          return (res[0] ?? []) as any[];
+        });
+        for (const p of rows) {
+          const factCounts = await this.surreal
+            .withCompany(companyId, async (db) => {
+              const res = (await db.query<any[]>(
+                `SELECT count() AS c FROM knowledge_fact
+                  WHERE predicate = $p AND status = 'active' GROUP ALL;
+                 SELECT count() AS c FROM knowledge_fact
+                  WHERE predicate = $p AND status = 'retracted' GROUP ALL;`,
+                { p: p.predicateId },
+              )) as any[];
+              return [countOf(res[0]), countOf(res[1])];
+            })
+            .catch(() => [0, 0]);
+          out.push({
+            companyId,
+            predicate: p.predicateId,
+            piiClass: p.piiClass,
+            requiresScope: p.requiresScope ?? '',
+            factCount: factCounts[0],
+            retractedCount: factCounts[1],
+          });
+        }
+      } catch (e) {
+        this.logger.warn(
+          `pii inventory failed for ${companyId}: ${(e as Error).message}`,
+        );
+      }
+    }
+    return out;
+  }
+
+  /**
    * Cross-tenant read of `audit_event` (migration 0023). Per-tenant
    * iteration mirrors `buildOverview` — the consumer writes events
    * inside each tenant DB, so this fans out the same way.

@@ -33,6 +33,11 @@ const ALLOWED_PREFIXES = [
   'v1/admin/changefeed',
   'v1/admin/maintenance/',
   'v1/admin/dreams',
+  'v1/admin/config',
+  'v1/admin/dlq',
+  'v1/admin/forgotten',
+  'v1/admin/pii',
+  'v1/admin/operator-actions',
   // Brain user-facing endpoints used by the Playground tabs
   'v1/search',
   'v1/synthesize',

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AuthModule } from '../auth/auth.module';
 import { DreamsModule } from '../dreams/dreams.module';
 import { IngestModule } from '../ingest/ingest.module';
@@ -11,13 +12,17 @@ import { AdminDemoController } from './admin-demo.controller';
 import { AdminEvalController } from './admin-eval.controller';
 import { AdminPredicatesController } from './admin-predicates.controller';
 import { AdminJobsController } from './admin-jobs.controller';
+import { AdminOpsController } from './admin-ops.controller';
 import { AdminService } from './admin.service';
+import { OperatorActionService } from './operator-action.service';
+import { OperatorActionInterceptor } from './operator-action.interceptor';
 import { ScenarioRunnerService } from './scenario-runner.service';
 import { BaselineService } from './baseline.service';
 import { ChatRouterService } from './chat-router.service';
 import { ChatRouterCacheService } from './chat-router-cache.service';
 import { CollapsePatternService } from './collapse-pattern.service';
 import { IntentClassifierService } from './intent-classifier.service';
+import { ConfigInspectorService } from './config-inspector.service';
 
 @Module({
   imports: [
@@ -35,6 +40,7 @@ import { IntentClassifierService } from './intent-classifier.service';
     AdminEvalController,
     AdminPredicatesController,
     AdminJobsController,
+    AdminOpsController,
   ],
   providers: [
     AdminService,
@@ -44,6 +50,12 @@ import { IntentClassifierService } from './intent-classifier.service';
     CollapsePatternService,
     IntentClassifierService,
     ChatRouterService,
+    ConfigInspectorService,
+    OperatorActionService,
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: OperatorActionInterceptor,
+    },
   ],
 })
 export class AdminModule {}
