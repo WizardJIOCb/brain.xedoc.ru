@@ -358,15 +358,39 @@ export class IngestService {
           entityIds.push(eid);
         }
 
-        for (const f of extraction.facts) {
+        // Batched embed of every fact's `${predicate}: ${object}`
+        // string in ONE call. Pre-batch each fact did its own embed
+        // round-trip inside recordExtractedFact — N facts = N
+        // sequential OpenAI calls before the loop could even start
+        // the first fn::resolve_fact. embedMany hits the LRU first,
+        // so re-ingest of identical clauses pays zero API calls.
+        const sourceFromContext = {
+          vertical: dto.contextRef.vertical,
+          eventId: dto.contextRef.eventId,
+          conversationId: dto.contextRef.conversationId,
+          messageId: dto.contextRef.messageId,
+        };
+        const factTexts = extraction.facts.map(
+          (f) => `${f.predicate}: ${f.object}`,
+        );
+        let factEmbeddings: number[][];
+        try {
+          factEmbeddings = await this.embedder.embedMany(factTexts);
+        } catch (e) {
+          // Fallback: let recordExtractedFact's per-row embed() handle
+          // it. We'd rather pay the round-trips than fail the whole
+          // mention on an embedder hiccup.
+          this.logger.warn(
+            `mention batched embed failed (${(e as Error).message}); ` +
+              `falling back to per-fact embed`,
+          );
+          factEmbeddings = [];
+        }
+
+        for (let i = 0; i < extraction.facts.length; i++) {
+          const f = extraction.facts[i];
           const eid = entityIds[f.entityIndex];
           if (!eid) continue;
-          const sourceFromContext = {
-            vertical: dto.contextRef.vertical,
-            eventId: dto.contextRef.eventId,
-            conversationId: dto.contextRef.conversationId,
-            messageId: dto.contextRef.messageId,
-          };
           const result = await traceSpan(
             'ingest.fact.upsert',
             () =>
@@ -377,6 +401,7 @@ export class IngestService {
                 validFrom: new Date(dto.emittedAt),
                 source: sourceFromContext,
                 extractionEntropy: f.extractionEntropy,
+                precomputedEmbedding: factEmbeddings[i],
               }),
             { predicate: f.predicate, entityId: eid },
           );
@@ -604,6 +629,13 @@ export class IngestService {
       validFrom: Date;
       source: any;
       extractionEntropy?: number;
+      /**
+       * When supplied, skips the per-row embed() round-trip — used by
+       * ingestMention which batch-embeds the entire fact list before
+       * the loop starts. Empty / missing means "compute it here" (the
+       * legacy path).
+       */
+      precomputedEmbedding?: number[];
     },
   ): Promise<{
     factId: string | null;
@@ -612,7 +644,12 @@ export class IngestService {
     competingFactIds?: string[];
   }> {
     const { predicate, object, confidence, validFrom, source } = factPayload;
-    const embedding = await this.embedder.embed(`${predicate}: ${object}`);
+    // Prefer the caller-supplied embedding (batched path) over a fresh
+    // round-trip. Falls back to the per-row embed() when the caller is
+    // the legacy single-fact flow (direct ingest, scenario runner).
+    const embedding =
+      factPayload.precomputedEmbedding ??
+      (await this.embedder.embed(`${predicate}: ${object}`));
 
     // Route through fn::resolve_fact so chat-extracted facts get the
     // same conflict-resolution treatment as directly-ingested ones.
