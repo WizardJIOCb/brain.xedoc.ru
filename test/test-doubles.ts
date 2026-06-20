@@ -11,13 +11,24 @@ import { SynthesizeService } from '../src/synthesize/synthesize.service';
  * For "is X close to Y" assertions in tests, we exploit text equality:
  * identical text → cosine 1.0; different text → cosine ~0.
  */
-export class StubEmbedder implements Pick<EmbedderService, 'embed' | 'getDimensions'> {
+export class StubEmbedder
+  implements Pick<EmbedderService, 'embed' | 'embedMany' | 'getDimensions'>
+{
   constructor(private readonly dimensions = 1536) {}
 
   async embed(text: string): Promise<number[]> {
     const trimmed = text.trim();
     if (!trimmed) return new Array(this.dimensions).fill(0);
     return hashToVector(trimmed, this.dimensions);
+  }
+
+  // Tracks the batched API added to EmbedderService alongside embed().
+  // ReindexEmbeddingsService + PredicateRegistryService both route
+  // through it now, so the stub MUST cover both surfaces or those
+  // call sites silently fall through to a fallback / failure branch
+  // in tests.
+  async embedMany(texts: string[]): Promise<number[][]> {
+    return Promise.all(texts.map((t) => this.embed(t)));
   }
 
   getDimensions(): number {

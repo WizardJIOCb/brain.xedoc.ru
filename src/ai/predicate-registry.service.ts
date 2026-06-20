@@ -116,19 +116,24 @@ export class PredicateRegistryService {
           `Seeding ${missing.length} core predicate(s) into ${companyId}: ` +
             missing.map((p) => p.predicateId).join(', '),
         );
-        // Embed the predicate "card" (id + description) so EDC similarity
-        // search has something to match against. Done at bootstrap so
-        // first-extraction latency stays predictable.
-        const embeddings = await Promise.all(
-          missing.map((p) =>
-            this.embedder.embed(embeddingTextFor(p)).catch((e) => {
-              this.logger.warn(
-                `Failed to embed predicate ${p.predicateId}: ${(e as Error).message}`,
-              );
-              return null;
-            }),
-          ),
-        );
+        // Embed the predicate "cards" in ONE batched call (OpenAI
+        // /embeddings accepts arrays). Pre-batch this was N sequential
+        // round-trips before the first request landed; the audit
+        // flagged it as fresh-tenant cold-start tax. embedMany also
+        // hits the per-text LRU cache so a second bootstrap on the
+        // same process pays no API calls.
+        let embeddings: Array<number[] | null>;
+        try {
+          embeddings = await this.embedder.embedMany(
+            missing.map((p) => embeddingTextFor(p)),
+          );
+        } catch (e) {
+          this.logger.warn(
+            `Batched predicate embed failed (${(e as Error).message}); ` +
+              `falling back to per-row inserts without embedding`,
+          );
+          embeddings = missing.map(() => null);
+        }
         for (let i = 0; i < missing.length; i++) {
           await db.query(`CREATE knowledge_predicate CONTENT $content`, {
             content: {
@@ -149,27 +154,37 @@ export class PredicateRegistryService {
         this.logger.log(
           `Backfilling embeddings for ${needBackfill.length} predicate(s) in ${companyId}`,
         );
-        for (const row of needBackfill) {
+        const texts = needBackfill.map((row) => {
           const seed = CORE_PREDICATES.find(
             (p) => p.predicateId === row.predicateId,
           );
-          // Use seed description when available; otherwise fall back to the
-          // bare predicateId so similarity at least lands on the lexical
-          // surface form.
-          const text = seed
+          return seed
             ? embeddingTextFor(seed)
             : row.predicateId.replace(/_/g, ' ');
+        });
+        let embs: Array<number[] | null>;
+        try {
+          embs = await this.embedder.embedMany(texts);
+        } catch (e) {
+          this.logger.warn(
+            `Batched backfill embed failed (${(e as Error).message}); ` +
+              `leaving the rows un-embedded for the next run`,
+          );
+          embs = needBackfill.map(() => null);
+        }
+        for (let i = 0; i < needBackfill.length; i++) {
+          const emb = embs[i];
+          if (!emb) continue;
           try {
-            const emb = await this.embedder.embed(text);
             await db.query(
               `UPDATE knowledge_predicate
                  SET embedding = $emb, updatedAt = time::now()
                WHERE predicateId = $pid`,
-              { emb, pid: row.predicateId },
+              { emb, pid: needBackfill[i].predicateId },
             );
           } catch (e) {
             this.logger.warn(
-              `Skipped embedding backfill for ${row.predicateId}: ${(e as Error).message}`,
+              `Backfill UPDATE failed for ${needBackfill[i].predicateId}: ${(e as Error).message}`,
             );
           }
         }

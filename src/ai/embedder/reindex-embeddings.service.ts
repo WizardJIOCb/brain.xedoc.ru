@@ -131,21 +131,39 @@ export class ReindexEmbeddingsService {
         const page = (rows as FactRowForReindex[]) ?? [];
         if (page.length === 0) break;
 
-        for (const row of page) {
-          factsScanned += 1;
-          if (opts.dryRun) continue;
+        factsScanned += page.length;
+        if (!opts.dryRun) {
+          // Batch the whole page through one embedMany — the previous
+          // per-row embed() loop paid one HTTP round-trip per fact,
+          // which made reindex unworkable on large tenants (a 100k-row
+          // tenant = 100k sequential calls). embedMany chunks 512 at
+          // a time inside the OpenAI provider.
+          const texts = page.map((row) => `${row.predicate}: ${row.object}`);
+          let embeddings: number[][];
           try {
-            const text = `${row.predicate}: ${row.object}`;
-            const embedding = await this.embedder.embed(text);
-            await db.query(
-              `UPDATE $id SET embedding = $embedding`,
-              { id: row.id, embedding },
-            );
-            factsUpdated += 1;
+            embeddings = await this.embedder.embedMany(texts);
           } catch (e) {
             this.logger.warn(
-              `reindex row failed (${companyId}): ${(e as Error).message}`,
+              `reindex batch embed failed (${companyId}, page=${page.length}): ${(e as Error).message}`,
             );
+            // Skip this page entirely; the next outer-loop iteration
+            // advances `offset` by `page.length` so we don't retry-loop.
+            offset += page.length;
+            if (page.length < batch) break;
+            continue;
+          }
+          for (let i = 0; i < page.length; i++) {
+            try {
+              await db.query(`UPDATE $id SET embedding = $embedding`, {
+                id: page[i].id,
+                embedding: embeddings[i],
+              });
+              factsUpdated += 1;
+            } catch (e) {
+              this.logger.warn(
+                `reindex row update failed (${companyId}): ${(e as Error).message}`,
+              );
+            }
           }
         }
         offset += page.length;
