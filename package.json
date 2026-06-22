@@ -3,8 +3,16 @@
   "version": "0.1.0",
   "description": "INITE Brain Service - Cross-vertical knowledge layer (system of insight, not record). Implements inite.service.brain spec @ inite-ecosystem/core/services/brain.yaml.",
   "author": "INITE",
+  "license": "AGPL-3.0-or-later",
   "private": true,
-  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inite-ai/inite-brain-service.git"
+  },
+  "homepage": "https://brain.inite.ai",
+  "bugs": {
+    "url": "https://github.com/inite-ai/inite-brain-service/issues"
+  },
   "packageManager": "pnpm@10.15.0",
   "scripts": {
     "build": "nest build",

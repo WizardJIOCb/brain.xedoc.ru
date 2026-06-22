@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2025 INITE — see LICENSE in the repository root.
+
 // OTel bootstrap MUST run before any code that imports `http`,
 // `express`, or other auto-instrumented modules. The instrumentations
 // patch via require-hooks; late init silently misses every prior

@@ -569,6 +569,56 @@ to skip the wikidata legs for fast-iteration loops; default behaviour pulls in
 `wd-russian-writers.json` + `wd-russian-writers-ru.json` and samples 30 entities
 (seed=42, deterministic) × 3 query templates per directory.
 
+## Contributing
+
+Open to contributions. Before opening a PR:
+
+1. **Tests must pass** — `pnpm test` (unit, ~5s, 485 cases) and ideally
+   `pnpm test:e2e:real` (testcontainers SurrealDB). The CI gate also runs
+   the multi-vertical eval scenarios with hard thresholds (see § Eval
+   harness); a retrieval-quality regression beyond per-metric tolerance
+   blocks merge.
+2. **Migrations are append-only** — `src/db/migrations/NNNN_*.surql`,
+   numeric order, idempotent (`IF NOT EXISTS` everywhere). Never edit a
+   shipped migration; add a new numbered file. Production tenants only
+   apply each id once, so changes to applied files are silently ignored.
+3. **No new dependencies without justification** — cold-start budget is
+   tight (BGE-M3 already ~150MB ONNX). The `pnpm-lock.yaml` is the
+   contract; a new top-level dep should come with a one-sentence reason
+   in the PR.
+4. **Commit messages explain the why** — see existing log. Phase/iter
+   tags (`feat(jobs): Phase J part 2.1 — ...`) are encouraged for
+   multi-commit feature streams.
+
+Issues and discussions on GitHub welcome — questions about architecture,
+extension points (custom `SummaryGenerator`, alternative embedders, new
+predicate verticals), and operator runbook gaps.
+
 ## License
 
-UNLICENSED — internal INITE ecosystem service.
+GNU Affero General Public License v3.0 or later — see [`LICENSE`](LICENSE).
+
+AGPL-3.0 was chosen because brain is a hosted backend service. The "SaaS
+loophole" present in GPL-3.0 (operating modified code over a network
+without distributing the binary doesn't trigger source-disclosure) does
+NOT apply under AGPL. If you host brain (modified or not) for users
+accessing it over a network, you must make the corresponding source
+available to them under the same terms.
+
+Concretely:
+
+- **Run brain unmodified, internally or for users** — fine, no source-
+  disclosure beyond what we already publish.
+- **Fork + host for users with your modifications** — your modifications
+  must be made available to those users under AGPL-3.0.
+- **Embed brain code in a proprietary product** — combined work must be
+  AGPL-3.0 (this is the standard copyleft requirement).
+- **Use the eval methodology, evaluation harness, or migration patterns
+  in an unrelated project** — independent reimplementation is not
+  derivative; reuse of substantial portions of source IS.
+
+This is operator-friendly (host as-is, ship features back upstream when
+convenient) and contributor-friendly (your code stays open even after a
+hostile SaaS fork). If AGPL is incompatible with your downstream
+licensing needs, open an issue — we may consider relicensing specific
+modules if the request is reasonable.
