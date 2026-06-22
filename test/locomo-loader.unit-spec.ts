@@ -1,0 +1,74 @@
+/**
+ * Coverage for the LoCoMo loader.
+ *
+ * Pins normalization: session_N keys → ordered sessions[] array,
+ * date_time → ISO, both standard and human ("1:56 pm on 8 May, 2023")
+ * forms.
+ */
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { loadLocomoDataset, normalizeSample } from '../test/eval/locomo/loader';
+import type { LocomoSample } from '../test/eval/locomo/types';
+
+const fixture: LocomoSample = {
+  sample_id: 'conv-1',
+  conversation: {
+    speaker_a: 'Alice',
+    speaker_b: 'Bob',
+    session_2: [
+      { dia_id: 'D2:1', speaker: 'Bob', text: 'second' },
+    ],
+    session_2_date_time: '8 May, 2023',
+    session_1: [
+      { dia_id: 'D1:1', speaker: 'Alice', text: 'first' },
+      { dia_id: 'D1:2', speaker: 'Bob', text: 'response' },
+    ],
+    session_1_date_time: '2023-05-01T12:00:00Z',
+  },
+  qa: [
+    {
+      question: 'What did Alice say first?',
+      answer: 'first',
+      category: 1,
+      evidence: ['D1:1'],
+    },
+  ],
+};
+
+describe('LoCoMo loader', () => {
+  it('normalizes a single sample into ordered sessions', () => {
+    const norm = normalizeSample(fixture);
+    expect(norm.sampleId).toBe('conv-1');
+    expect(norm.speakerA).toBe('Alice');
+    expect(norm.speakerB).toBe('Bob');
+    expect(norm.sessions.map((s) => s.index)).toEqual([1, 2]);
+    expect(norm.sessions[0].turns).toHaveLength(2);
+    expect(norm.sessions[1].turns).toHaveLength(1);
+  });
+
+  it('parses ISO datetimes through unchanged', () => {
+    const norm = normalizeSample(fixture);
+    expect(norm.sessions[0].dateTime).toBe('2023-05-01T12:00:00.000Z');
+  });
+
+  it('best-effort parses human "8 May, 2023" form', () => {
+    const norm = normalizeSample(fixture);
+    expect(norm.sessions[1].dateTime).toMatch(/^2023-05-08T/);
+  });
+
+  it('loads from disk and reads both shape variants', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'locomo-'));
+    const wrappedPath = path.join(tmp, 'wrapped.json');
+    const bareArrayPath = path.join(tmp, 'bare.json');
+    await fs.writeFile(wrappedPath, JSON.stringify({ samples: [fixture] }));
+    await fs.writeFile(bareArrayPath, JSON.stringify([fixture]));
+
+    const wrapped = await loadLocomoDataset(wrappedPath);
+    const bare = await loadLocomoDataset(bareArrayPath);
+
+    expect(wrapped).toHaveLength(1);
+    expect(bare).toHaveLength(1);
+    expect(wrapped[0].qa).toHaveLength(1);
+  });
+});

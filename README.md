@@ -70,7 +70,7 @@ Full walkthrough: [`docs/getting-started.md`](docs/getting-started.md).
 | **Wire it up** | [Getting started](docs/getting-started.md) · [Migration guide](docs/migration-guide.md) |
 | **Understand it** | [Architecture](docs/architecture.md) · [API reference](docs/api.md) · [Data model](docs/data-model.md) · [Bitemporal semantics](docs/bitemporal-semantics.md) |
 | **Run it** | [Operations](docs/operations.md) · [Operator playbook](docs/operator-playbook.md) · [Deploy runbook](docs/DEPLOY.md) |
-| **Measure it** | [Eval harness](docs/eval.md) |
+| **Measure it** | [Eval harness](docs/eval.md) · [LoCoMo benchmark](docs/locomo.md) |
 
 All in [`docs/`](docs/README.md).
 
