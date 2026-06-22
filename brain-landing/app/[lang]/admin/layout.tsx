@@ -16,6 +16,7 @@ import {
   History,
   KeyRound,
   ListChecks,
+  Lock,
   Menu,
   Moon,
   Network,
@@ -84,6 +85,7 @@ const GROUPS: Group[] = [
       { slug: 'migrations', title: 'Migrations', icon: Database },
       { slug: 'throttler', title: 'Throttler', icon: SlidersHorizontal },
       { slug: 'now', title: 'In-flight', icon: Radio },
+      { slug: 'leases', title: 'Leases', icon: Lock },
     ],
   },
   {
