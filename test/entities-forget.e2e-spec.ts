@@ -111,6 +111,7 @@ describe('POST /v1/entities/:id/forget — GDPR cascade', () => {
     // would write an audit_event carrying the entity's post-image,
     // including PII fact `object` values. Seed one keyed by the entity's
     // recordId so we can assert the forget cascade purges it.
+    const tail = entityId.split(':')[1];
     await surreal.withCompany(f.companyId, async (db) => {
       await db.query(
         `CREATE audit_event CONTENT {
@@ -123,6 +124,41 @@ describe('POST /v1/entities/:id/forget — GDPR cascade', () => {
             consumedBy: 'test'
          }`,
         { rid: entityId },
+      );
+      // Seed every other PII-bearing store the forget cascade must purge.
+      await db.query(
+        `CREATE knowledge_artifact CONTENT {
+            entityId: type::thing('knowledge_entity', $tail),
+            artifactType: 'customer_profile',
+            payload: { name: 'secret-pii-value' },
+            sourceFactIds: [], dirty: false }`,
+        { tail },
+      );
+      await db.query(
+        `CREATE ingest_dead_letter CONTENT {
+            payload: { entityId: type::thing('knowledge_entity', $tail),
+                       object: 'secret-pii-value' },
+            reason: 'low_score' }`,
+        { tail },
+      );
+      await db.query(
+        `CREATE entity_external_ref CONTENT {
+            key: 'rent:secret-external-id',
+            entity: type::thing('knowledge_entity', $tail) }`,
+        { tail },
+      );
+      await db.query(
+        `CREATE dream_emit CONTENT {
+            runId: 'r1', kind: 'link', subject: $rid,
+            object: $rid, detail: { note: 'secret-pii-value' } }`,
+        { rid: entityId },
+      );
+      await db.query(
+        `CREATE debug_trace CONTENT {
+            requestId: 'rq1', method: 'POST', path: '/v1/ingest/fact',
+            status: 201, durationMs: 1, companyId: $cid,
+            spans: [], artifacts: [{ ref: $rid, text: 'secret-pii-value' }] }`,
+        { cid: f.companyId, rid: entityId },
       );
     });
 
@@ -174,6 +210,41 @@ describe('POST /v1/entities/:id/forget — GDPR cascade', () => {
         { rid: entityId },
       );
       expect((auditRows as any[]).length).toBe(0);
+
+      // GDPR completeness: every other PII store must be purged too.
+      const countWhere = async (sql: string, params: any) => {
+        const [rows] = await db.query<any[][]>(sql, params);
+        return (rows as any[]).length;
+      };
+      expect(
+        await countWhere(
+          `SELECT id FROM knowledge_artifact WHERE entityId = type::thing('knowledge_entity', $tail)`,
+          { tail },
+        ),
+      ).toBe(0);
+      expect(
+        await countWhere(
+          `SELECT id FROM ingest_dead_letter WHERE payload.entityId = type::thing('knowledge_entity', $tail)`,
+          { tail },
+        ),
+      ).toBe(0);
+      expect(
+        await countWhere(
+          `SELECT id FROM entity_external_ref WHERE entity = type::thing('knowledge_entity', $tail)`,
+          { tail },
+        ),
+      ).toBe(0);
+      expect(
+        await countWhere(`SELECT id FROM dream_emit WHERE subject = $rid`, {
+          rid: entityId,
+        }),
+      ).toBe(0);
+      expect(
+        await countWhere(
+          `SELECT id FROM debug_trace WHERE companyId = $cid`,
+          { cid: f.companyId },
+        ),
+      ).toBe(0);
     });
   });
 

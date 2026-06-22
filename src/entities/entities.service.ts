@@ -324,6 +324,10 @@ export class EntitiesService {
       if (!entity) {
         throw new NotFoundException(`Entity ${entityIdRaw} not found`);
       }
+      // Use the DB's own stringification of the id (not string-concat of
+      // ref.full) so it matches exactly how the changefeed consumer wrote
+      // recordId, regardless of any escaping for non-alphanumeric ids.
+      const entityIdStr = String(entity.id);
 
       // Collect the exact record ids that will be deleted BEFORE deleting
       // them. The changefeed consumer mirrors every knowledge_* mutation
@@ -367,18 +371,60 @@ export class EntitiesService {
       // record (entity + its facts + edges). recordId IN [...] matches
       // exactly how the consumer wrote them.
       //
-      // Residual (documented, not recoverable as queryable data): the
-      // SurrealDB CHANGEFEED keeps raw pre-images in rocksdb for its 30d
-      // retention window. The consumer never materialises `before`
-      // images and delete-op changes carry no post-image, so no PII is
-      // re-mirrored into audit_event after this purge; the rocksdb log
-      // auto-expires at 30d.
-      const recordIds = [ref.full, ...factIds, ...edgeIds];
+      // Race note: the changefeed consumer is a lagging cron. If a
+      // CREATE/UPDATE for one of these records is still unconsumed in the
+      // rocksdb CHANGEFEED at forget time, a later tick re-materialises it
+      // into audit_event. The structural defence is consumer-side
+      // redaction of PII value fields in `after` (see
+      // changefeed-consumer redactAfterImage) so re-mirrored rows carry
+      // no raw PII; this purge removes the already-materialised rows.
+      const recordIds = [entityIdStr, ...factIds, ...edgeIds];
       const [auditDeleted] = await db.query<any[][]>(
         `DELETE audit_event WHERE recordId IN $ids RETURN BEFORE`,
         { ids: recordIds },
       );
       const auditEventsDeleted = ((auditDeleted as any[]) ?? []).length;
+
+      // dream_emit: subject/object hold the entity/fact ids the dreams
+      // resolver linked or superseded — purge any referencing the
+      // forgotten records (carries fact-derived `detail`).
+      await db.query(
+        `DELETE dream_emit WHERE subject IN $ids OR object IN $ids`,
+        { ids: recordIds },
+      );
+
+      // debug_trace: per-request blobs (artifacts) can carry the subject's
+      // raw fact text / queries when DEBUG_TRACE_PERSIST is on. Not
+      // entity-keyed, so best-effort: drop this tenant's traces whose
+      // serialised artifacts reference the entity or any deleted fact id.
+      await db.query(
+        `DELETE debug_trace
+           WHERE companyId = $cid
+             AND string::contains(<string>artifacts, $needle)`,
+        { cid: companyId, needle: entityIdStr },
+      );
+
+      // knowledge_artifact: compiled per-entity dossiers (customer_profile,
+      // support_context) carry name/contact/complaints — entityId-keyed.
+      await db.query(
+        `DELETE knowledge_artifact
+           WHERE entityId = type::thing('knowledge_entity', $rid)`,
+        { rid: ref.id },
+      );
+
+      // ingest_dead_letter: rejected facts keep payload.{object,entityId}.
+      await db.query(
+        `DELETE ingest_dead_letter
+           WHERE payload.entityId = type::thing('knowledge_entity', $rid)`,
+        { rid: ref.id },
+      );
+
+      // entity_external_ref: external subject identifier + pointer.
+      await db.query(
+        `DELETE entity_external_ref
+           WHERE entity = type::thing('knowledge_entity', $rid)`,
+        { rid: ref.id },
+      );
 
       const entityIdHash =
         'hmac:' +
