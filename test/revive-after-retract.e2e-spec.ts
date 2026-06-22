@@ -17,6 +17,7 @@
  */
 import type { AppFixture } from './app-fixture';
 import { createApp } from './app-fixture';
+import { SurrealService } from '../src/db/surreal.service';
 
 describe('revive after retract — memlc.cycle scenario', () => {
   let f: AppFixture;
@@ -161,5 +162,65 @@ describe('revive after retract — memlc.cycle scenario', () => {
       .flatMap((r: any) => r.facts)
       .map((f: any) => f.object as string);
     expect(objectsAfterB).toContain('A');
+  });
+
+  it('natural supersede must NOT set retractedAt (migration 0014 contract)', async () => {
+    await f.http.post('/v1/ingest/fact').set(auth()).send({
+      entityRef: { vertical: 'rent', id: 'supersede_contract' },
+      predicate: 'name',
+      object: 'Supersede Contract',
+      validFrom: '2026-01-01',
+      source: { vertical: 'rent', eventId: 'auth.created' },
+      confidence: 0.95,
+    });
+    const a = await f.http.post('/v1/ingest/fact').set(auth()).send({
+      entityRef: { vertical: 'rent', id: 'supersede_contract' },
+      predicate: 'status',
+      object: 'first',
+      validFrom: '2026-02-01',
+      source: { vertical: 'rent', eventId: 'evt-1' },
+      confidence: 0.9,
+    });
+    const aFactId = a.body.factId as string;
+    const b = await f.http.post('/v1/ingest/fact').set(auth()).send({
+      entityRef: { vertical: 'rent', id: 'supersede_contract' },
+      predicate: 'status',
+      object: 'second',
+      validFrom: '2026-05-01',
+      source: { vertical: 'rent', eventId: 'evt-2' },
+      confidence: 0.9,
+    });
+    expect(b.body.outcome).toBe('SUPERSEDED');
+    expect(b.body.supersededFactIds).toContain(aFactId);
+
+    // The superseded predecessor: status='superseded', supersededBy set,
+    // but retractedAt MUST be NONE — a natural supersede is not a
+    // retraction, and setting retractedAt would erase it from asOf
+    // slices + emit a spurious timeline 'fact.retracted' event.
+    const surreal = f.app.get(SurrealService);
+    await surreal.withCompany(f.companyId, async (db) => {
+      const tail = aFactId.split(':')[1];
+      const [rows] = await db.query<any[][]>(
+        `SELECT status, retractedAt, retractionReason, supersededBy
+           FROM type::thing('knowledge_fact', $tail) LIMIT 1`,
+        { tail },
+      );
+      const row = (rows as any[])[0];
+      expect(row.status).toBe('superseded');
+      expect(row.retractedAt).toBeFalsy();
+      expect(row.supersededBy).toBeTruthy();
+      // The revive sentinel is retained (revive + calibration rely on it).
+      expect(row.retractionReason).toBe('superseded');
+    });
+
+    // Timeline must NOT report the natural supersede as a retraction.
+    const timeline = await f.http
+      .get('/v1/entities/knowledge_entity:supersede_contract/timeline')
+      .set(auth());
+    expect(timeline.status).toBe(200);
+    const retractedEvents = (timeline.body.events ?? []).filter(
+      (e: any) => e.type === 'fact.retracted' && String(e.factId) === aFactId,
+    );
+    expect(retractedEvents).toHaveLength(0);
   });
 });
