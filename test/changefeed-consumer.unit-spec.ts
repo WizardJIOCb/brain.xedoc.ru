@@ -117,6 +117,56 @@ describe('ChangefeedConsumerService', () => {
     expect(r.pendingRemaining).toBe(3);
   });
 
+  it('does not re-emit the boundary row when SINCE is inclusive', async () => {
+    // Cursor already at 12; the DB (inclusive SINCE) re-returns vs=12 plus a
+    // genuinely new vs=14. Only the new row must be emitted and the cursor
+    // advanced — the boundary row at the cursor is dropped.
+    const { surreal, calls } = mkSurreal({
+      cursors: { knowledge_entity: 12 },
+      changes: {
+        knowledge_entity: [
+          {
+            versionstamp: 12,
+            changes: [{ update: { id: 'knowledge_entity:b', name: 'B' } }],
+          },
+          {
+            versionstamp: 14,
+            changes: [{ update: { id: 'knowledge_entity:c', name: 'C' } }],
+          },
+        ],
+      },
+    });
+    const svc = mkSvc(surreal);
+    const r = await svc.consumeForTenant('co_a');
+    expect(r.consumed.knowledge_entity).toBe(1);
+    const inserts = calls.filter((c) =>
+      c.sql.startsWith('INSERT INTO audit_event'),
+    );
+    expect(((inserts[0].params?.events ?? []) as unknown[]).length).toBe(1);
+    const advance = calls.find((c) =>
+      c.sql.startsWith('UPSERT changefeed_state'),
+    );
+    expect(advance!.params?.vs).toBe(14);
+  });
+
+  it('emits nothing on a second tick with no new writes past the cursor', async () => {
+    // Two ticks, the only change is at the cursor boundary → 0 new emits.
+    const { surreal, calls } = mkSurreal({
+      cursors: { knowledge_fact: 20 },
+      changes: {
+        knowledge_fact: [
+          { versionstamp: 20, changes: [{ update: { id: 'knowledge_fact:x' } }] },
+        ],
+      },
+    });
+    const svc = mkSvc(surreal);
+    const r = await svc.consumeForTenant('co_a');
+    expect(r.consumed).toEqual({});
+    expect(
+      calls.filter((c) => c.sql.startsWith('INSERT INTO audit_event')),
+    ).toHaveLength(0);
+  });
+
   it('emits no audit_event rows when the source returns nothing', async () => {
     const { surreal, calls } = mkSurreal({});
     const svc = mkSvc(surreal);

@@ -301,7 +301,17 @@ export class EntitiesService {
             : undefined,
           direction: 'inbound' as const,
         })),
-      ];
+      ].filter((edge) => {
+        // Defense-in-depth: the DB-level PERMISSIONS fence (migration 0005)
+        // gates knowledge_fact.object, but knowledge_edge has no such fence,
+        // so a scoped caller could otherwise read a PII-classed relation
+        // (edge.kind maps to a predicate). Mirror the timeline policyFor
+        // filter: drop edges whose kind requires a scope the caller lacks.
+        const policy = policyFor(edge.kind);
+        return (
+          !policy.requiresScope || scopes.includes(policy.requiresScope)
+        );
+      });
       return { entityId: ref.full, edges };
     });
   }

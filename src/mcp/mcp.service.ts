@@ -128,7 +128,15 @@ export class McpService {
         },
       },
       async (args) => {
-        const out = await this.entities.getConnections(companyId, args.entityId, args.kind);
+        // Pass scopes — without them getConnections signs in with an
+        // empty scope set, bypassing the DB-level PII fence (every other
+        // MCP tool forwards scopes).
+        const out = await this.entities.getConnections(
+          companyId,
+          args.entityId,
+          args.kind,
+          scopes,
+        );
         return {
           content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
           structuredContent: out as any,

@@ -35,16 +35,26 @@ describe('redactAfterImage', () => {
     expect('embedding' in out).toBe(false);
   });
 
-  it('redacts entity name + aliases', () => {
+  it('redacts entity name + aliases + the lowercase mirror + external refs', () => {
     const out = redactAfterImage({
       id: 'knowledge_entity:e1',
       type: 'person',
       canonicalName: 'Jane Doe',
+      canonicalNameLc: 'jane doe', // the stored computed mirror — must redact
       aliases: ['JD', 'Janie'],
+      externalRefs: { crm: 'secret-id' },
     });
     expect(out.canonicalName).toBe(REDACTED);
+    expect(out.canonicalNameLc).toBe(REDACTED);
     expect(out.aliases).toBe(REDACTED);
+    expect(out.externalRefs).toBe(REDACTED);
     expect(out.type).toBe('person');
+  });
+
+  it('redacts unknown/future fields by default (allowlist, not denylist)', () => {
+    const out = redactAfterImage({ id: 'x', someNewPiiField: 'leak me' });
+    expect(out.someNewPiiField).toBe(REDACTED);
+    expect(out.id).toBe('x');
   });
 
   it('leaves null/absent PII fields untouched (no spurious [redacted])', () => {

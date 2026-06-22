@@ -327,7 +327,17 @@ export class ChangefeedConsumerService {
     const [rows] = await db.query(
       `SHOW CHANGES FOR TABLE ${source} SINCE ${since}`,
     );
-    return (rows as Array<Record<string, unknown>>) ?? [];
+    const changes = (rows as Array<Record<string, unknown>>) ?? [];
+    // SurrealDB's SHOW CHANGES ... SINCE <vs> is inclusive of the boundary
+    // versionstamp: a cursor parked at the last consumed vs would re-surface
+    // that same row on the next tick → duplicate audit_event. Drop anything
+    // at or below the cursor. Idempotent regardless of the DB's exact
+    // boundary semantics; cold start (since=0) keeps all real changes since
+    // versionstamps are strictly positive.
+    if (since > 0) {
+      return changes.filter((c) => (c.versionstamp as number) > since);
+    }
+    return changes;
   }
 
   /**
@@ -405,14 +415,41 @@ export class ChangefeedConsumerService {
  * `embedding` is dropped as bloat (huge float array, not human PII).
  */
 export const REDACTED = '[redacted]';
-const PII_VALUE_FIELDS = ['object', 'objectMeta', 'canonicalName', 'aliases'];
+// Allowlist of STRUCTURAL fields kept verbatim in the audit mirror. Any
+// other field — present or future — is redacted, so a new PII-bearing
+// column can't silently leak (denylist regressed once: canonicalNameLc /
+// externalRefs were missed). `embedding` is dropped as bloat.
+const STRUCTURAL_FIELDS = new Set([
+  'id',
+  'entityId',
+  'predicate',
+  'op',
+  'status',
+  'validFrom',
+  'validUntil',
+  'recordedAt',
+  'retractedAt',
+  'retractionReason',
+  'supersededBy',
+  'priorValidUntil',
+  'confidence',
+  'kind',
+  'in',
+  'out',
+  'weight',
+  'artifactType',
+  'dirty',
+  'mergedInto',
+  'mergedAt',
+  'type',
+]);
 export function redactAfterImage(
   row: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(row)) {
     if (k === 'embedding') continue; // drop float-array bloat
-    out[k] = PII_VALUE_FIELDS.includes(k) && v != null ? REDACTED : v;
+    out[k] = STRUCTURAL_FIELDS.has(k) || v == null ? v : REDACTED;
   }
   return out;
 }
