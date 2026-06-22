@@ -61,8 +61,8 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
     warnings.push('FORGET_HMAC_KEY is shorter than 32 chars — recommended ≥ 32');
   }
 
-  // ── DB-level PII fence (scoped pool) ──────────────────────────────
-  validateScopedPool(env, errors, warnings);
+  // ── Production-only guards (scoped pool + test-only kill switches) ─
+  validateProductionGuards(env, errors, warnings);
 
   // ── Embedding dimensions ──────────────────────────────────────────
   const dims = env.OPENAI_EMBEDDING_DIMENSIONS;
@@ -111,24 +111,36 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
  * app-layer JS policy filter. In production that fail-open is a privacy
  * hole, so refuse to start; in dev, warn loudly.
  */
-function validateScopedPool(
+function validateProductionGuards(
   env: NodeJS.ProcessEnv,
   errors: string[],
   warnings: string[],
 ): void {
-  const haveBoth =
+  const isProd = env.NODE_ENV === 'production';
+
+  const haveScoped =
     !!env.SURREALDB_SCOPED_USER?.trim() && !!env.SURREALDB_SCOPED_PASS?.trim();
-  if (haveBoth) return;
-  if (env.NODE_ENV === 'production') {
+  if (!haveScoped) {
+    if (isProd) {
+      errors.push(
+        'SURREALDB_SCOPED_USER and SURREALDB_SCOPED_PASS must BOTH be set in ' +
+          'production — without them withScopedCompany() falls back to the ' +
+          'root pool and the DB-level PII fence (migration 0005) is bypassed.',
+      );
+    } else {
+      warnings.push(
+        'SURREALDB_SCOPED_USER/PASS not set — DB-level PII fence inactive ' +
+          '(app-layer policy only). Set both before deploying.',
+      );
+    }
+  }
+
+  // Test-only kill switch must never run in production.
+  if (isProd && env.THROTTLE_DISABLED === '1') {
     errors.push(
-      'SURREALDB_SCOPED_USER and SURREALDB_SCOPED_PASS must BOTH be set in ' +
-        'production — without them withScopedCompany() falls back to the ' +
-        'root pool and the DB-level PII fence (migration 0005) is bypassed.',
-    );
-  } else {
-    warnings.push(
-      'SURREALDB_SCOPED_USER/PASS not set — DB-level PII fence inactive ' +
-        '(app-layer policy only). Set both before deploying.',
+      'THROTTLE_DISABLED=1 is a test-only flag and must not be set in ' +
+        'production — it disables all rate limiting, including the ' +
+        'expensive OpenAI-budget caps.',
     );
   }
 }

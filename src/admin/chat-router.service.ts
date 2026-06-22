@@ -92,8 +92,12 @@ export class ChatRouterService {
   ) {
     this.openai = new OpenAI({
       apiKey: this.config.getOrThrow<string>('OPENAI_API_KEY'),
-      timeout: 15_000,
-      maxRetries: 1,
+      // Honour the same OPENAI_TIMEOUT_MS / OPENAI_MAX_RETRIES knobs every
+      // other OpenAI-using service reads — this was the sole outlier
+      // hardcoding 15s/1, so an operator raising the timeout silently
+      // didn't apply to chat routing.
+      timeout: parseInt(this.config.get<string>('OPENAI_TIMEOUT_MS', '30000'), 10),
+      maxRetries: parseInt(this.config.get<string>('OPENAI_MAX_RETRIES', '3'), 10),
     });
     this.model = this.config.get<string>('OPENAI_CHAT_MODEL', 'gpt-4o-mini');
     this.hintSimilarityThreshold = parseFloat(

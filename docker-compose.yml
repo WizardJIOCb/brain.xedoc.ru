@@ -34,6 +34,10 @@ services:
       # password on first tenant request (migration 0005 + ensureScopedUser).
       - SURREALDB_SCOPED_USER=brain_caller
       - SURREALDB_SCOPED_PASS=${SURREALDB_SCOPED_PASS:-local-scoped-secret}
+      # Container runs as non-root (uid 1000); the default ./var path is
+      # root-owned → BaselineService writes EACCES. Point at the node-owned
+      # cache dir created in the Dockerfile.
+      - BRAIN_BASELINES_DIR=/app/.cache/baselines
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - BRAIN_API_KEYS=${BRAIN_API_KEYS:-[]}
       - FORGET_HMAC_KEY=${FORGET_HMAC_KEY:-}

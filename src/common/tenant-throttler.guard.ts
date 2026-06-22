@@ -30,7 +30,16 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
    * entirely. Never set in production.
    */
   protected async shouldSkip(context: ExecutionContext): Promise<boolean> {
-    if (process.env.THROTTLE_DISABLED === '1') return true;
+    // Inert in production even if the flag leaks into a deploy env —
+    // validateEnv also hard-errors on it at boot. Defense in depth: a
+    // stray THROTTLE_DISABLED must never silently drop the expensive
+    // OpenAI-budget caps in prod.
+    if (
+      process.env.THROTTLE_DISABLED === '1' &&
+      process.env.NODE_ENV !== 'production'
+    ) {
+      return true;
+    }
     return super.shouldSkip(context);
   }
 

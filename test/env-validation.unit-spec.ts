@@ -49,3 +49,19 @@ describe('validateEnv — scoped pool fence', () => {
     expect(() => validateEnv(env)).not.toThrow();
   });
 });
+
+describe('validateEnv — THROTTLE_DISABLED is test-only', () => {
+  it('hard-errors when THROTTLE_DISABLED=1 in production', () => {
+    const env = baseProdEnv();
+    env.THROTTLE_DISABLED = '1';
+    expect(() => validateEnv(env)).toThrow(/THROTTLE_DISABLED/);
+  });
+
+  it('allows THROTTLE_DISABLED=1 in development', () => {
+    const env = baseProdEnv();
+    env.NODE_ENV = 'development';
+    env.THROTTLE_DISABLED = '1';
+    delete env.FORGET_HMAC_KEY;
+    expect(() => validateEnv(env)).not.toThrow();
+  });
+});
