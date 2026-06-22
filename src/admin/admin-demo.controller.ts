@@ -130,6 +130,8 @@ export class AdminDemoController {
     };
   }
 
+  // Fans out to embedding + cross-encoder/reranker like /v1/search.
+  @Throttle({ expensive: { limit: 10, ttl: 60_000 } })
   @Post('search')
   @RequireScopes('brain:admin')
   async demoSearch(
@@ -340,6 +342,8 @@ export class AdminDemoController {
     };
   }
 
+  // Dreams orchestration fans out to OpenAI (summaries/dedup).
+  @Throttle({ expensive: { limit: 3, ttl: 60_000 } })
   @Post('dreams')
   @RequireScopes('brain:admin')
   async demoDreams(

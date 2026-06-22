@@ -8,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ApiKeyGuard, RequireScopes } from '../auth/api-key.guard';
 import { McpService } from './mcp.service';
@@ -29,6 +30,15 @@ export class McpController {
    * MCP clients that need long-running sessions should call once per
    * tool use; stateful sessions can be added later via sessionIdGenerator.
    */
+  // MCP tools (search_knowledge, ingest_fact, …) reach the same
+  // OpenAI-fanout paths that the REST controllers cap via the
+  // `expensive` bucket. Without this the MCP route was a throttle
+  // bypass at the 120/min default. Use a per-route expensive override
+  // (30/min) rather than the global 10: a single stateless tool use is
+  // several JSON-RPC POSTs (initialize / tools/list / tools/call), and
+  // the handshake messages don't fan out to OpenAI — 30 leaves headroom
+  // for them while still capping the OpenAI-bound calls well below 120.
+  @Throttle({ expensive: { limit: 30, ttl: 60_000 } })
   @All(':companyId')
   @RequireScopes('brain:read')
   async handle(
