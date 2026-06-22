@@ -21,6 +21,13 @@ export class InFlightGuard {
   /**
    * Run `fn` exclusively for `key`. Re-entries while a previous fn
    * is running return null without invoking fn again.
+   *
+   * Contract caveat: `null` is the "skipped — already running" sentinel,
+   * so it is AMBIGUOUS with an `fn` that itself resolves `null`. Callers
+   * that branch on `=== null` to detect a skip MUST therefore use an `fn`
+   * whose own success value is never `null` (return a result object/`void`
+   * sentinel instead). All current callers (dreams, calibration-refit)
+   * satisfy this.
    */
   async run<T>(key: string, fn: () => Promise<T>): Promise<T | null> {
     if (this.active.has(key)) return null;

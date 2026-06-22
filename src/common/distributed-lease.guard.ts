@@ -32,6 +32,11 @@ export class DistributedLeaseGuard {
    * `ttlSeconds` controls how long the lease is held; release on
    * completion is automatic. Pick a value comfortably longer than
    * the worst-case body duration.
+   *
+   * Contract caveat: `null` is the "skipped — lease held" sentinel and is
+   * AMBIGUOUS with an `fn` that itself resolves `null`. Callers that branch
+   * on `=== null` to detect a skip must use an `fn` whose own success value
+   * is never `null`.
    */
   async run<T>(
     key: string,

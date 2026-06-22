@@ -18,6 +18,8 @@ interface PooledWorker {
   worker: Worker;
   ready: boolean;
   inFlight: PendingRequest | null;
+  /** Set once the worker has exited; such a slot must never be re-idled. */
+  dead?: boolean;
 }
 
 /**
@@ -133,6 +135,13 @@ export class JobWorkerPool implements OnModuleInit, OnApplicationShutdown {
       throw new Error('JobWorkerPool shutting down');
     }
     const w = await this.acquire();
+    // acquire() may have parked us as a waiter; onApplicationShutdown
+    // resolves pending waiters with a placeholder worker to unblock them.
+    // Re-check after the await — dereferencing that placeholder's
+    // (undefined) `.worker.postMessage` would throw a raw TypeError.
+    if (this.shuttingDown || !w.worker) {
+      throw new Error('JobWorkerPool shutting down');
+    }
     const id = this.nextReqId++;
     try {
       return await new Promise<R>((resolve, reject) => {
@@ -168,6 +177,11 @@ export class JobWorkerPool implements OnModuleInit, OnApplicationShutdown {
 
   private release(w: PooledWorker): void {
     if (this.shuttingDown) return;
+    // A worker that crashed mid-job is already spliced out of `workers`
+    // (and flagged dead) by the exit handler. Never re-idle / hand it to
+    // a waiter — that would poison the pool: the next acquire() returns a
+    // terminated worker whose postMessage no-ops and run() hangs forever.
+    if (w.dead || !this.workers.includes(w)) return;
     const next = this.waiters.shift();
     if (next) next(w);
     else this.idle.push(w);
@@ -225,6 +239,7 @@ export class JobWorkerPool implements OnModuleInit, OnApplicationShutdown {
         this.logger.warn(`Worker error: ${err.message}`);
       });
       worker.on('exit', (code) => {
+        slot.dead = true;
         if (slot.inFlight) {
           slot.inFlight.reject(new Error(`worker exited (code ${code})`));
           slot.inFlight = null;

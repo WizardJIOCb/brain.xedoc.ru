@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { Subject } from 'rxjs';
 import { SurrealService } from '../db/surreal.service';
 import { ApiKeyService } from '../auth/api-key.service';
+import { LRUCache } from '../common/lru-cache';
 
 export type JobType =
   | 'dreams'
@@ -101,7 +102,14 @@ export class JobRunService {
    * propagates into the handler's AbortSignal. Pre-Phase-J this Set
    * was misnamed `cancelRequestsAcrossPods` — it never replicated.
    */
-  private readonly inProcessCancelHints = new Set<string>();
+  // Bounded, not a plain Set: in queue mode a job completes via
+  // JobClaimService.complete() (not JobRunService.finish()), so a hint set
+  // by requestCancel() on a running row is never cleared by finish() and
+  // would leak the runId for the process lifetime. The LRU caps that; the
+  // durable cancel signal is the persisted job_run.cancelRequested column,
+  // which isCancelRequested() also consults, so an evicted hint never loses
+  // a cancel in persist mode.
+  private readonly inProcessCancelHints = new LRUCache<string, true>(10_000);
   private readonly persistEnabled: boolean;
 
   constructor(
@@ -244,7 +252,7 @@ export class JobRunService {
    * "no longer cancellable" hint.
    */
   async requestCancel(runId: string, companyId: string): Promise<boolean> {
-    this.inProcessCancelHints.add(runId);
+    this.inProcessCancelHints.set(runId, true);
     if (!this.persistEnabled || !this.surreal) return true;
     try {
       const updated = await this.surreal.withCompany(companyId, async (db) => {
@@ -263,6 +271,12 @@ export class JobRunService {
           { runId },
         )) as any[];
         const rows = (res[0] ?? []) as Array<{ status?: string }>;
+        // A pending row taken straight to 'cancelled' is terminal — finish()
+        // will never run for it, so drop the in-process hint here. Running
+        // rows keep it until finish() (inline) or LRU eviction (queue).
+        if (rows[0]?.status === 'cancelled') {
+          this.inProcessCancelHints.delete(runId);
+        }
         return rows.length > 0;
       });
       return updated;

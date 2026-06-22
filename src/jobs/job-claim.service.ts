@@ -290,8 +290,11 @@ export class JobClaimService {
   }
 
   /**
-   * Terminal success. Frees the claim so a manual re-enqueue with the
-   * same dedupKey can re-run from scratch.
+   * Terminal success. Writes status='succeeded' and releases the lease
+   * (claimedBy/leaseUntil=NONE) so the zombie-reaper leaves it alone. The
+   * `dedupKey` STAYS on the row, so a re-enqueue with the same key collapses
+   * onto this succeeded row (findByDedup matches any status) rather than
+   * re-running — callers that want a fresh run must use a new dedupKey.
    */
   async complete(input: {
     companyId: string;

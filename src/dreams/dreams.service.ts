@@ -84,7 +84,14 @@ export class DreamsService implements OnModuleInit {
     @Optional() private readonly jobs?: JobRunService,
     @Optional() private readonly claim?: JobClaimService,
     @Optional() private readonly workerLoop?: WorkerLoopService,
-    @Optional() private readonly guard: DistributedLeaseGuard = new DistributedLeaseGuard(),
+    // No default `= new DistributedLeaseGuard()`: that constructed a
+    // lease-LESS guard that degraded to local-only single-flight, silently
+    // bypassing the distributed lease and letting every pod run the dreams
+    // cron at once. JobsModule is @Global, so production DI always injects
+    // the properly-wired guard (carrying LeaderLeaseService). Stays
+    // @Optional so the positional unit tests (no DI) can omit it — they run
+    // unguarded, which is correct for single-process tests.
+    @Optional() private readonly guard?: DistributedLeaseGuard,
   ) {
     this.enabled =
       this.configService.get<string>('DREAMS_ENABLED', '0') === '1';
@@ -146,7 +153,9 @@ export class DreamsService implements OnModuleInit {
     if (this.claim && this.queueModeEnabled()) {
       return this.enqueueDailyForAllTenants();
     }
-    const result = await this.guard.run('dreams_all', () => this.runAll());
+    const result = this.guard
+      ? await this.guard.run('dreams_all', () => this.runAll())
+      : await this.runAll();
     if (result === null) {
       this.logger.warn(
         'dreams cron skipped — previous runAll still in flight',
@@ -300,9 +309,11 @@ export class DreamsService implements OnModuleInit {
       triggeredByActor?: string;
     },
   ): Promise<DreamsTenantStats> {
-    const guarded = await this.guard.run(`dreams_tenant_${companyId}`, () =>
-      this.runForTenantInner(companyId, operations, triggered),
-    );
+    const guarded = this.guard
+      ? await this.guard.run(`dreams_tenant_${companyId}`, () =>
+          this.runForTenantInner(companyId, operations, triggered),
+        )
+      : await this.runForTenantInner(companyId, operations, triggered);
     if (guarded !== null) return guarded;
     this.logger.warn(
       `dreams skipped for ${companyId} — previous run still in flight`,
