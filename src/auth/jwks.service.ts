@@ -10,6 +10,11 @@ const VALID_SCOPES: ReadonlySet<BrainScope> = new Set([
   'brain:read_pii',
 ]);
 
+// Tenant slug charset. The companyId becomes the `co_<id>` database name
+// and is interpolated into record ids, so it must stay within a safe
+// identifier charset (alnum / underscore / hyphen, bounded length).
+const VALID_COMPANY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
 /**
  * JWT verification against the @inite/auth-service JWKS endpoint.
  *
@@ -69,6 +74,14 @@ export class JwksService implements OnModuleInit {
 
     const companyId = typeof payload.sub === 'string' ? payload.sub : null;
     if (!companyId) return null;
+    // The sub becomes the tenant database name (`co_<companyId>`) and is
+    // interpolated into SurrealDB record ids. An out-of-charset value would
+    // surface as a DB-layer 500 deep in a query; reject it here so a malformed
+    // token is a clean 401 instead. Tenant slugs are alnum/underscore/hyphen.
+    if (!VALID_COMPANY_ID.test(companyId)) {
+      this.logger.debug('JWT rejected: sub is not a valid companyId');
+      return null;
+    }
 
     const scopes = extractScopes(payload).filter((s): s is BrainScope =>
       VALID_SCOPES.has(s as BrainScope),

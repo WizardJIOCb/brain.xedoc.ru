@@ -1,4 +1,9 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MetricsService } from '../metrics/metrics.service';
 import { Surreal, StringRecordId } from 'surrealdb';
@@ -78,6 +83,20 @@ export class IngestService {
   }
 
   async ingestFact(companyId: string, dto: IngestFactDto): Promise<IngestResult> {
+    // Reject an inverted or zero-width validity interval up front. Both are
+    // nonsensical bitemporally — a fact valid until before (or exactly at)
+    // it became valid covers no instant — and would otherwise corrupt
+    // asOf-query selection inside fn::resolve_fact. class-validator can't
+    // express this cross-field constraint, so it lives here.
+    if (dto.validUntil !== undefined) {
+      const from = Date.parse(dto.validFrom);
+      const until = Date.parse(dto.validUntil);
+      if (Number.isFinite(from) && Number.isFinite(until) && until <= from) {
+        throw new BadRequestException(
+          'validUntil must be strictly after validFrom',
+        );
+      }
+    }
     return this.surreal.withCompany(companyId, async (db) => {
       // 1. Resolve entity (own atomic step — own tx with unique-retry).
       const entityId = await this.resolveOrCreateEntity(db, dto);
@@ -782,7 +801,10 @@ export class IngestService {
     // otherwise the chain is invisible to the operator.
     traceArtifact('ingest.fact.outcome', {
       predicate,
-      object,
+      // Symmetric with the redacted ingest.mention.input trace: mask any
+      // email/phone/long-digit PII in the value before it lands in a debug
+      // artifact. Non-PII values (city, tier, name) pass through unchanged.
+      object: redactPii(object),
       outcome,
       semantics: policy.semantics,
       ...(result?.supersededFactIds

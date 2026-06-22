@@ -278,6 +278,7 @@ export class CalibrationRefitService implements OnModuleInit {
             status
           FROM knowledge_fact
           WHERE source.vertical IS NOT NONE
+          ORDER BY recordedAt DESC
           LIMIT 50000;`,
       );
       const events = (rows ?? []).map((r) => ({
@@ -486,6 +487,7 @@ export class CalibrationRefitService implements OnModuleInit {
             FROM knowledge_fact
             WHERE confidence IS NOT NONE
               AND time::now() - recordedAt > 30d
+            ORDER BY recordedAt DESC
             LIMIT 5000;`,
       );
       const pairs: CalibrationPair[] = [];

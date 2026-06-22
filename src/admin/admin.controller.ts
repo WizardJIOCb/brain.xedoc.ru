@@ -256,7 +256,11 @@ export class AdminController {
       bin.meanCorrect += p.correctness;
       const calibrated = applyMap(map, p.rawConfidence);
       bin.meanCalibrated += calibrated;
-      brier += (p.rawConfidence - p.correctness) ** 2;
+      // Brier/ECE on the CALIBRATED confidence — this panel validates that
+      // the isotonic map reduces miscalibration. Using rawConfidence here
+      // (the prior behaviour) reported the pre-fit error and made the map
+      // look like a no-op no matter how good it was.
+      brier += (calibrated - p.correctness) ** 2;
     }
     let ece = 0;
     for (const b of bins) {
@@ -264,7 +268,9 @@ export class AdminController {
       b.meanRaw /= b.n;
       b.meanCorrect /= b.n;
       b.meanCalibrated /= b.n;
-      ece += (b.n / BOOTSTRAP_GOLD_SET.length) * Math.abs(b.meanRaw - b.meanCorrect);
+      ece +=
+        (b.n / BOOTSTRAP_GOLD_SET.length) *
+        Math.abs(b.meanCalibrated - b.meanCorrect);
     }
     brier /= Math.max(1, BOOTSTRAP_GOLD_SET.length);
     const curve = Array.from({ length: 21 }, (_, i) => {

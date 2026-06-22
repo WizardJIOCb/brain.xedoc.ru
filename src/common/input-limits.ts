@@ -41,6 +41,10 @@ export function clampLlmInputText(
   kind: LlmInputKind,
 ): { value: string; truncated: boolean } {
   const limit = LLM_INPUT_LIMITS[kind];
+  // The MCP raw-arg path can hand us a non-string (number/object/null) before
+  // class-validator runs. `.trim()` on that throws — guard so a malformed
+  // arg becomes empty input rather than a 500.
+  if (typeof value !== 'string') return { value: '', truncated: false };
   const trimmed = value.trim();
   if (trimmed.length <= limit) return { value: trimmed, truncated: false };
   return { value: trimmed.slice(0, limit), truncated: true };

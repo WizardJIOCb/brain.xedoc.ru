@@ -85,6 +85,10 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
   // ── Throttling ────────────────────────────────────────────────────
   positiveInt(env, 'THROTTLE_TTL_MS', errors);
   positiveInt(env, 'THROTTLE_LIMIT', errors);
+  // The "expensive" tier (search/synthesize) has its own knobs read in
+  // app.module; validate them too so a typo isn't silently parseInt→NaN.
+  positiveInt(env, 'THROTTLE_EXPENSIVE_TTL_MS', errors);
+  positiveInt(env, 'THROTTLE_EXPENSIVE_LIMIT', errors);
   positiveInt(env, 'COMPACTION_HOT_RETENTION_DAYS', errors);
 
   for (const w of warnings) log.warn(w);

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -273,9 +274,13 @@ export class AdminJobsController {
     @Req() req: AuthenticatedRequest,
     @Body() body: { companyId?: string } = {},
   ): AcceptedCompactionResponse {
-    const target = body.companyId
-      ? [body.companyId]
-      : this.apiKeys.knownCompanyIds();
+    const known = this.apiKeys.knownCompanyIds();
+    if (body.companyId && !known.includes(body.companyId)) {
+      throw new BadRequestException(
+        `Unknown companyId '${body.companyId}' — not a registered tenant`,
+      );
+    }
+    const target = body.companyId ? [body.companyId] : known;
     void (async () => {
       for (const companyId of target) {
         try {
@@ -329,7 +334,13 @@ export class AdminJobsController {
     body: { tenant?: string; dryRun?: boolean; maxFacts?: number } = {},
   ): Promise<AcceptedReindexResponse> {
     const tenants = this.apiKeys.knownCompanyIds();
-    const hostTenant = body.tenant?.trim() || tenants[0];
+    const tenantFilter = body.tenant?.trim();
+    if (tenantFilter && !tenants.includes(tenantFilter)) {
+      throw new BadRequestException(
+        `Unknown tenant '${tenantFilter}' — not a registered tenant`,
+      );
+    }
+    const hostTenant = tenantFilter || tenants[0];
     const row = await this.jobs.start({
       jobType: 'reindex_embeddings',
       companyId: hostTenant,
