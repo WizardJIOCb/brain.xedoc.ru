@@ -4,6 +4,7 @@ import { JobRunService } from './job-run.service';
 import { JobClaimService } from './job-claim.service';
 import { LeaderLeaseService } from './leader-lease.service';
 import { WorkerLoopService } from './worker-loop.service';
+import { LeaseManagerService } from './lease-manager.service';
 import { DistributedLeaseGuard } from '../common/distributed-lease.guard';
 
 /**
@@ -32,6 +33,7 @@ import { DistributedLeaseGuard } from '../common/distributed-lease.guard';
     JobClaimService,
     LeaderLeaseService,
     WorkerLoopService,
+    LeaseManagerService,
     DistributedLeaseGuard,
   ],
   exports: [
@@ -39,6 +41,7 @@ import { DistributedLeaseGuard } from '../common/distributed-lease.guard';
     JobClaimService,
     LeaderLeaseService,
     WorkerLoopService,
+    LeaseManagerService,
     DistributedLeaseGuard,
   ],
 })
