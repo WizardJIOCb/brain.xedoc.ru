@@ -272,10 +272,16 @@ export class CalibrationRefitService implements OnModuleInit {
           }>,
         ]
       >(
+        // recordedAt is projected explicitly: with aliased columns in the
+        // SELECT, SurrealDB's ORDER BY resolver only sees the projection, so
+        // ordering by an un-projected field silently breaks the query (same
+        // alias/ORDER BY quirk noted in entities.service). Keep the alias for
+        // the consumed columns and surface recordedAt so the sort resolves.
         `SELECT
             source.vertical AS vertical,
             source.recorder AS recorder,
-            status
+            status,
+            recordedAt
           FROM knowledge_fact
           WHERE source.vertical IS NOT NONE
           ORDER BY recordedAt DESC
