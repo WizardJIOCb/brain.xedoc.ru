@@ -9,7 +9,7 @@
   "hero": {
     "eyebrow": "Битемпоральный граф знаний",
     "title": "Память, которая помнит когда.",
-    "subtitle": "INITE Brain — open-source слой памяти на тенанта для AI-агентов. Битемпоральные факты, гибридный поиск, ingest с разрешением конфликтов и GDPR-forget, который реально работает — через REST и нативный MCP. Разверни у себя или возьми managed-облако.",
+    "subtitle": "У каждого факта двое часов: когда он был правдой и когда Brain об этом узнал. Спроси, что верно сейчас, — или воспроизведи, что граф знал в марте. Конфликты получают оценку, а не молча перезаписываются. Forget — это удаление, а не пометка «скрыто». REST или MCP, у себя или в облаке.",
     "ctaPrimary": "Начать",
     "ctaSecondary": "Self-host",
     "trust": {
@@ -21,21 +21,21 @@
       "title": "Битемпоральный ридаут",
       "valid": "valid time",
       "txn": "transaction time",
-      "note": "У каждого факта двое часов. По умолчанию запрос «сейчас»; передай asOf — и Brain воспроизведёт ровно то, что знал в любой прошлый момент."
+      "note": "По умолчанию запрос отвечает «сейчас». Передай asOf — и тот же запрос вернёт то, что Brain знал на тот момент, без достройки задним числом."
     }
   },
   "dualPath": {
-    "eyebrow": "Запускай как удобно",
-    "title": "Два пути, один граф знаний.",
+    "eyebrow": "Self-host или хостинг",
+    "title": "Два способа запустить. Один граф.",
     "selfHost": {
       "label": "Open source",
       "title": "Self-host",
-      "desc": "Склонируй, настрой и подними весь стек на своей инфре. AGPL-3.0 — можно аудитить, форкать и расширять.",
+      "desc": "Склонируй репозиторий, подними SurrealDB, дай ему свои ключи. AGPL-3.0 — каждую строчку можно читать, форкать и присылать обратно.",
       "bullets": [
-        "Docker Compose — SurrealDB + сервис за минуты",
-        "Данные не покидают твою сеть",
-        "Локальный BGE-M3, ноль внешних embedding-вызовов",
-        "Полный admin-кокпит и eval-сьют в комплекте"
+        "Docker Compose — SurrealDB и сервис за минуты",
+        "Ничего не уходит из твоей сети",
+        "BGE-M3 считает эмбеддинги локально — без звонков в OpenAI",
+        "Admin-кокпит и eval-сьют лежат в репозитории"
       ],
       "cmd": "docker compose up -d",
       "cta": "Гайд по self-host"
@@ -43,12 +43,12 @@
     "managed": {
       "label": "Managed",
       "title": "brain.inite.ai",
-      "desc": "Без эксплуатации. Хостед multi-tenant эндпоинт с тем же API, авто-деплой на каждый push в main.",
+      "desc": "Та же сборка, но без няньченья. Хостед-эндпоинт, который передеплоивается на каждый push в main.",
       "bullets": [
-        "Никакой инфраструктуры на поддержке",
-        "Изоляция на тенанта + scoped API-ключи",
-        "Авто-деплой, health- и metrics-эндпоинты",
-        "Тот же REST + MCP, что и в self-host"
+        "Ни серверов, ни базы на поддержке",
+        "Изоляция на тенанта, scoped API-ключи",
+        "Health и Prometheus-метрики из коробки",
+        "Тот же REST + MCP, что в self-host"
       ],
       "endpoint": "https://brain.inite.ai",
       "cta": "Открыть дашборд"
@@ -56,9 +56,9 @@
   },
   "stats": {
     "eyebrow": "Eval-гейты",
-    "title": "Продакшен-гейты, не цифры для красоты.",
-    "subtitle": "Каждый push прогоняет multi-vertical eval по retrieval + memory-lifecycle. Числа ниже — это CI-полы; уйти под них = заблокированный релиз.",
-    "footnote": "Числа из multi-vertical сценариев (n=255) + 180 wikidata-запросов. Bootstrap-CI на каждой retrieval-метрике.",
+    "title": "Цифры, которые блокируют мёрж.",
+    "subtitle": "Каждый push гоняет eval по retrieval и memory-lifecycle. Отметки ниже — это CI-полы: упал под одну — сборка краснеет.",
+    "footnote": "Последний прогон гейта: multi-vertical сценарии (n=255) плюс 180 wikidata-запросов, bootstrap-CI на каждой retrieval-метрике.",
     "items": [
       { "label": "recall@1", "value": "0.965", "floor": "≥ 0.6" },
       { "label": "faithfulness", "value": "1.000", "floor": "≥ 0.8" },
@@ -103,16 +103,16 @@
   },
   "mcpBlock": {
     "eyebrow": "Model Context Protocol",
-    "title": "Подключить Claude к графу знаний — одной строкой.",
-    "subtitle": "Per-tenant MCP URL, scope-aware. Одни и те же шесть инструментов в каждом клиенте.",
+    "title": "Один блок конфига. Шесть инструментов. Любой клиент.",
+    "subtitle": "MCP-URL на тенанта, scope-aware. Вставь в Claude Desktop, Cursor, Goose или n8n — агент получает те же шесть инструментов.",
     "toolsLabel": "Шесть scope-aware инструментов",
     "clients": "Claude Desktop, Cursor, Goose, n8n — один URL, один заголовок, ноль glue-кода.",
     "linkLabel": "Гайд по настройке MCP"
   },
   "skillsBlock": {
     "eyebrow": "Скиллы агента",
-    "title": "Скиллы для агента, не только провода.",
-    "subtitle": "Четыре Anthropic-skill: search, recall, bitemporal и сама пошаговая настройка. Учат агента, как пользоваться Brain.",
+    "title": "Скиллы, которые учат агента работать с Brain.",
+    "subtitle": "Четыре Anthropic-skill — search, recall, битемпоральные запросы и пошаговая настройка. Один curl ставит их в ~/.claude/skills.",
     "linkLabel": "Все скиллы",
     "installCmd": "curl -fsSL https://brain.inite.ai/install.sh | sh"
   },
@@ -134,7 +134,7 @@
     },
     "cta": {
       "title": "Поставь звезду",
-      "desc": "Следи за разработкой, заводи issues и влияй на роадмап.",
+      "desc": "Следи за релизами, заводи issues, присылай патчи. Роадмап открытый.",
       "button": "Star на GitHub"
     }
   },

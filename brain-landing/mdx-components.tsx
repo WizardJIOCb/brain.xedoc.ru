@@ -12,7 +12,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
     h1: (props) => (
       <h1
-        className="text-3xl font-semibold tracking-tight text-[var(--text)] mt-2 mb-4"
+        className="u-display text-[2rem] font-bold tracking-[-0.01em] text-[var(--text)] mt-2 mb-4"
         {...props}
       />
     ),
@@ -50,7 +50,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         return (
           <Link
             href={href}
-            className="text-[var(--accent)] hover:text-[var(--accent-hover)] underline decoration-[var(--accent)]/30 underline-offset-2"
+            className="text-[var(--data)] hover:text-[var(--signal)] underline decoration-[var(--data)]/40 underline-offset-2 transition-colors"
           >
             {children}
           </Link>
@@ -61,7 +61,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
           href={href}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-[var(--accent)] hover:text-[var(--accent-hover)] underline decoration-[var(--accent)]/30 underline-offset-2"
+          className="text-[var(--data)] hover:text-[var(--signal)] underline decoration-[var(--data)]/40 underline-offset-2 transition-colors"
           {...rest}
         >
           {children}
@@ -81,7 +81,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     ),
     blockquote: (props) => (
       <blockquote
-        className="my-4 pl-3 border-l-2 border-[var(--accent)] text-[var(--text-muted)]"
+        className="my-4 pl-3 border-l-2 border-[var(--signal)] text-[var(--text-muted)]"
         {...props}
       />
     ),

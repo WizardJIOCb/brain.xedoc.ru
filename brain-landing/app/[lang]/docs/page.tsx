@@ -14,7 +14,7 @@ export default async function DocsIndex({ params }: Props) {
 
   return (
     <div>
-      <h1 className="text-3xl font-semibold tracking-tight text-[var(--text)] mt-2 mb-2">
+      <h1 className="u-display text-[2rem] font-bold tracking-[-0.01em] text-[var(--text)] mt-2 mb-2">
         {t.docs.indexTitle}
       </h1>
       <p className="text-[15px] leading-relaxed text-[var(--text-muted)] mb-8">
@@ -39,7 +39,7 @@ export default async function DocsIndex({ params }: Props) {
                     <span className="text-sm font-semibold text-[var(--text)]">
                       {meta?.title}
                     </span>
-                    <ChevronRight className="w-3.5 h-3.5 text-[var(--text-faint)] group-hover:text-[var(--accent)] transition-colors" />
+                    <ChevronRight className="w-3.5 h-3.5 text-[var(--text-faint)] group-hover:text-[var(--signal)] transition-colors" />
                   </div>
                   <p className="mt-1 text-[13px] leading-relaxed text-[var(--text-muted)]">
                     {meta?.description}
