@@ -1,3 +1,9 @@
+// Hard server-only gate. Importing this file from a 'use client'
+// component fails the Next.js build — server-only's module
+// initialisation throws under client bundling. Prevents the M2M
+// admin credentials in here from ever being bundled into JS sent
+// to the browser.
+import 'server-only'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyAccessToken, isAdminFromToken } from './jwt-verify'
 

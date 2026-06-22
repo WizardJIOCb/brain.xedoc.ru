@@ -84,6 +84,14 @@ export class ConfigInspectorService {
     }));
   }
 
+  // TODO: catalogue is a declarative list of every env-flag + its
+  // documentation. The 473-line method is intentional — these aren't
+  // many small functions, it's ONE big literal. Splitting would
+  // sprinkle 30+ getters across the file for no readability win.
+  // Right refactor target is moving the entries into a JSON
+  // resource file, then this method becomes a `parse + project`.
+  // Tracked separately.
+  // eslint-disable-next-line max-lines-per-function
   private catalogue(): Array<
     Omit<ConfigEntry, 'currentValue'> & {
       defaultValue: string | null;

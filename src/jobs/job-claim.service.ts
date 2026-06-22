@@ -1,7 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { context, propagation, trace } from '@opentelemetry/api';
+import { context, propagation } from '@opentelemetry/api';
 import {
   SurrealService,
   runTransaction,

@@ -15,6 +15,7 @@ import type { AuthenticatedRequest } from '../auth/api-key.types';
 import { AdminService } from './admin.service';
 import { DreamsService } from '../dreams/dreams.service';
 import { RunDreamsDto } from '../dreams/dto/run-dreams.dto';
+// eslint-disable-next-line import/no-restricted-paths -- TODO: layer migration. Move the inline withCompany() / withAdminDb() queries below into a dedicated admin service, then drop this import. New controllers MUST NOT import db/* directly.
 import { SurrealService } from '../db/surreal.service';
 import { ChatRouterCacheService } from './chat-router-cache.service';
 import { CollapsePatternService } from './collapse-pattern.service';
@@ -44,6 +45,11 @@ import { DEMO_LIVE_COMPANY } from './admin-demo.controller';
 @Controller('v1/admin')
 @UseGuards(ApiKeyGuard)
 export class AdminController {
+  // TODO: pre-existing god-controller. Split the surface into
+  // AdminFactsController / AdminEntitiesController / AdminRouterController
+  // and the DI list shrinks naturally. Tracked separately so the new
+  // import/no-restricted-paths + max-params gates work for new code.
+  // eslint-disable-next-line max-params
   constructor(
     private readonly admin: AdminService,
     private readonly dreams: DreamsService,

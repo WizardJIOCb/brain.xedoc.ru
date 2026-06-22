@@ -12,6 +12,13 @@
  * cached in-process until ~30s before expiry.
  */
 
+// Hard server-only gate. The OAUTH_CLIENT_SECRET this module mints
+// tokens with must NEVER end up in the client bundle. server-only
+// throws at module init when imported under client bundling, so any
+// 'use client' file accidentally pulling brain-api in fails the
+// Next.js build instead of silently leaking the secret.
+import 'server-only'
+
 const BRAIN_API_URL =
   process.env.BRAIN_API_URL ||
   process.env.NEXT_PUBLIC_BRAIN_API_URL ||

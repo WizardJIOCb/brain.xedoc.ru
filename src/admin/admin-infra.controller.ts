@@ -1,6 +1,7 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiKeyGuard, RequireScopes } from '../auth/api-key.guard';
+// eslint-disable-next-line import/no-restricted-paths -- TODO: layer migration. Move the inline withCompany() / withAdminDb() queries below into a dedicated admin service, then drop this import. New controllers MUST NOT import db/* directly.
 import { SurrealService } from '../db/surreal.service';
 import { ApiKeyService } from '../auth/api-key.service';
 import { EmbedderService } from '../ai/embedder.service';

@@ -11,10 +11,7 @@ import {
 import { CalibrationService } from './calibration.service';
 import { JobRunService } from '../../jobs/job-run.service';
 import { JobClaimService } from '../../jobs/job-claim.service';
-import {
-  WorkerLoopService,
-  type JobContext,
-} from '../../jobs/worker-loop.service';
+import { WorkerLoopService } from '../../jobs/worker-loop.service';
 import { DistributedLeaseGuard } from '../../common/distributed-lease.guard';
 
 /**

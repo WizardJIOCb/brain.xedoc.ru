@@ -301,6 +301,10 @@ export class JobRunService {
    * per tenant before merging so a single noisy tenant can't crowd
    * out the rest.
    */
+  // TODO: complexity 26 — three optional WHERE branches + per-tenant
+  // fan-out + row-shape projection. Extract buildWhere + rowToRow
+  // helpers to drop back under the gate. Tracked separately.
+  // eslint-disable-next-line complexity
   async list(filter: {
     jobType?: JobType;
     status?: JobStatus;

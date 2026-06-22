@@ -103,6 +103,32 @@ export default tseslint.config(
       // before a clean-arch sweep; the rule is wired but its perf
       // budget is too steep for the every-PR loop.
       'import/no-cycle': 'off',
+      // Controllers MUST NOT import db services directly. Controller
+      // = HTTP plumbing (request parsing, auth, response shaping);
+      // business logic lives in services. A direct
+      // `await this.surreal.withCompany(...).query(...)` inside a
+      // controller is a layer leak — the next operator who needs the
+      // same logic from a cron / SSE / MCP path has to copy-paste it.
+      // Force the refactor: put the query in a service, controller
+      // delegates.
+      //
+      // Existing violations (5 files) carry per-line
+      // // eslint-disable-next-line import/no-restricted-paths with
+      // a TODO so the debt is grep-able and gets cleaned up
+      // incrementally. New code blocked outright.
+      'import/no-restricted-paths': [
+        'error',
+        {
+          zones: [
+            {
+              target: './src/**/*.controller.ts',
+              from: './src/db',
+              message:
+                'Controllers MUST NOT import from src/db directly. Move the query into a service and inject the service instead. See § layer purity in CONTRIBUTING.md.',
+            },
+          ],
+        },
+      ],
       'sonarjs/no-identical-functions': 'error',
       'sonarjs/no-duplicated-branches': 'error',
 

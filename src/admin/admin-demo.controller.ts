@@ -23,6 +23,7 @@ import {
   traceArtifact,
   traceSpan,
 } from '../common/debug-trace';
+// eslint-disable-next-line import/no-restricted-paths -- TODO: layer migration. Move the inline withCompany() / withAdminDb() queries below into a dedicated admin service, then drop this import. New controllers MUST NOT import db/* directly.
 import { SurrealService } from '../db/surreal.service';
 import { IngestService } from '../ingest/ingest.service';
 import { SearchService } from '../search/search.service';

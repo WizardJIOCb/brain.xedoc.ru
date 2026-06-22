@@ -5,6 +5,7 @@ import {
   HttpStatus,
   ServiceUnavailableException,
 } from '@nestjs/common';
+// eslint-disable-next-line import/no-restricted-paths -- TODO: layer migration. Move the inline withCompany() / withAdminDb() queries below into a dedicated admin service, then drop this import. New controllers MUST NOT import db/* directly.
 import { SurrealService } from '../db/surreal.service';
 import { EmbedderService } from '../ai/embedder.service';
 

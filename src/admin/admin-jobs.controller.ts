@@ -28,6 +28,7 @@ import { DreamsService } from '../dreams/dreams.service';
 import { CalibrationRefitService } from '../ai/calibration/calibration-refit.service';
 import { CompactionService } from '../compaction/compaction.service';
 import { ChangefeedConsumerService } from '../audit/changefeed-consumer.service';
+// eslint-disable-next-line import/no-restricted-paths -- TODO: layer migration. Move the inline withCompany() / withAdminDb() queries below into a dedicated admin service, then drop this import. New controllers MUST NOT import db/* directly.
 import { SurrealService } from '../db/surreal.service';
 import { ApiKeyService } from '../auth/api-key.service';
 import { ConfigService } from '@nestjs/config';
@@ -54,6 +55,11 @@ import {
 @Controller('v1/admin')
 @UseGuards(ApiKeyGuard)
 export class AdminJobsController {
+  // TODO: bundle Phase J/K deps (claim, leaderLease, workerLoop,
+  // workerPool, config) into an injectable JobsAdminDeps so this
+  // constructor drops back under the max-params gate. Tracked with
+  // the dreams.service.ts companion TODO.
+  // eslint-disable-next-line max-params
   constructor(
     private readonly jobs: JobRunService,
     private readonly dreams: DreamsService,

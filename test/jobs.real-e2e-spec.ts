@@ -24,7 +24,6 @@ describe('JobClaimService — real Surreal end-to-end', () => {
   let moduleRef: TestingModule;
   let surreal: SurrealService;
   let claim: JobClaimService;
-  let leader: LeaderLeaseService;
 
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
@@ -34,7 +33,6 @@ describe('JobClaimService — real Surreal end-to-end', () => {
     await moduleRef.init();
     surreal = moduleRef.get(SurrealService);
     claim = moduleRef.get(JobClaimService);
-    leader = moduleRef.get(LeaderLeaseService);
   }, 60_000);
 
   afterAll(async () => {

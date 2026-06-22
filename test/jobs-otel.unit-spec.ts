@@ -10,7 +10,7 @@
  * OTEL_ENABLED=0, where the propagator is the default W3C one but
  * spans are no-op.
  */
-import { context, propagation, trace } from '@opentelemetry/api';
+import { context, propagation } from '@opentelemetry/api';
 import { JobClaimService } from '../src/jobs/job-claim.service';
 import { WorkerLoopService } from '../src/jobs/worker-loop.service';
 import { ConfigService } from '@nestjs/config';
