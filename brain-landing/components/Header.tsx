@@ -6,14 +6,13 @@ import { Star } from 'lucide-react'
 import { LanguageSwitcher } from './LanguageSwitcher'
 import { getMessages, type Lang } from '../lib/i18n'
 import { useAuth } from '../hooks/useAuth'
+import { REPO } from '../lib/seo'
 
 interface Props {
   lang: Lang
   /** Optional page-context slot next to the brand. */
   context?: string
 }
-
-const REPO = 'inite-ai/inite-brain-service'
 
 /** Live star count, best-effort. Falls back to a plain "Star" CTA. */
 function useStars(): string | null {

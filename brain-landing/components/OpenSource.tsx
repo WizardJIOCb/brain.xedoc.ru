@@ -1,12 +1,11 @@
 import { Scale, BookOpen, ShieldCheck, GitPullRequest, Star, ArrowRight } from 'lucide-react'
 import { SectionHeading } from './DualPath'
 import { getMessages, type Lang } from '../lib/i18n'
+import { REPO } from '../lib/seo'
 
 interface Props {
   lang: Lang
 }
-
-const REPO = 'inite-ai/inite-brain-service'
 
 // Tech names aren't localized — they're proper nouns.
 const STACK = [

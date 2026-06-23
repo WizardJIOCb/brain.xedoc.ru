@@ -19,7 +19,7 @@ interface AgentAction {
   mutation?: boolean
 }
 
-const API = 'https://brain.inite.ai'
+const API = SITE_URL
 
 const ACTIONS: AgentAction[] = [
   {

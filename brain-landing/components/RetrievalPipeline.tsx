@@ -29,7 +29,7 @@ export function RetrievalPipeline({ lang }: Props) {
         <ol className="mt-4 space-y-px">
           {stages.map((s, i) => {
             // funnel: bar shrinks as the candidate set narrows
-            const w = 100 - (i / (stages.length - 1)) * 64
+            const w = 100 - (i / Math.max(stages.length - 1, 1)) * 64
             return (
               <li
                 key={i}

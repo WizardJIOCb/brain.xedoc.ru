@@ -33,6 +33,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const post = getBlogPost(slug, lang)
   if (!post) return {}
   const url = `${SITE_URL}/${lang}/blog/${slug}`
+  const og = ogImage({ title: post.title, kicker: post.category, kind: 'blog' })
   return {
     title: `${post.seoTitle ?? post.title} — INITE Brain`,
     description: post.description,
@@ -51,15 +52,13 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
       publishedTime: post.date,
       authors: [post.author],
       tags: post.tags,
-      images: [
-        { url: ogImage({ title: post.title, kicker: post.category, kind: 'blog' }), width: 1200, height: 630 },
-      ],
+      images: [{ url: og, width: 1200, height: 630 }],
     },
     twitter: {
       card: 'summary_large_image',
       title: post.title,
       description: post.description,
-      images: [ogImage({ title: post.title, kicker: post.category, kind: 'blog' })],
+      images: [og],
     },
   }
 }

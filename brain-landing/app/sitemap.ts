@@ -57,7 +57,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     for (const page of DOCS_PAGES) {
       entries.push({
         url: `${SITE_URL}/${lang}/docs/${page.slug}`,
-        lastModified: gitMtime(`app/[lang]/docs/${page.slug}/page.mdx`),
+        lastModified: gitMtime(`content/docs/en/${page.slug}.mdx`),
         changeFrequency: 'monthly',
         priority: 0.6,
         alternates: alternates(`/docs/${page.slug}`),
