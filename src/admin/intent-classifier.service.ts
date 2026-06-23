@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from '../common/lru-cache';
+import { importTransformers } from '../ai/transformers-cache';
 
 /**
  * Zero-shot intent classifier — multilingual NLI without enumerated
@@ -117,7 +118,7 @@ export class IntentClassifierService implements OnModuleInit {
   private async warmup(): Promise<void> {
     const start = Date.now();
     try {
-      const transformers = await import('@xenova/transformers');
+      const transformers = await importTransformers();
       // Dynamic import so the transformers runtime is only paid for
       // when the feature is enabled — keeps cold-boot fast in
       // CHAT_ROUTE_NLI_ENABLED=false deployments.

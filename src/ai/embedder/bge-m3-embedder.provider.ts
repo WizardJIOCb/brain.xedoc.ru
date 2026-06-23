@@ -3,6 +3,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Semaphore } from '../../common/semaphore';
+import { importTransformers } from '../transformers-cache';
 import type { EmbedderProvider } from './embedder-provider.interface';
 
 interface FeatureExtractionPipeline {
@@ -121,7 +122,7 @@ export class BgeM3EmbedderProvider implements EmbedderProvider {
   private async warmupInThread(): Promise<void> {
     const start = Date.now();
     try {
-      const transformers = await import('@xenova/transformers');
+      const transformers = await importTransformers();
       this.pipeline = (await transformers.pipeline(
         'feature-extraction',
         this.modelId,

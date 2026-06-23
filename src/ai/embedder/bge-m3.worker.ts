@@ -19,6 +19,7 @@
  * can wait without the parent's awareness).
  */
 import { parentPort } from 'node:worker_threads';
+import { importTransformers } from '../transformers-cache';
 
 interface WorkerConfig {
   modelId: string;
@@ -57,7 +58,7 @@ async function warmup(cfg: WorkerConfig): Promise<void> {
   if (warmupPromise) return warmupPromise;
   warmupPromise = (async () => {
     dimensions = cfg.dimensions;
-    const transformers = await import('@xenova/transformers');
+    const transformers = await importTransformers();
     pipeline = (await transformers.pipeline(
       'feature-extraction',
       cfg.modelId,

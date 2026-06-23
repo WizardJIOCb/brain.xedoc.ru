@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from '../common/lru-cache';
+import { importTransformers } from './transformers-cache';
 
 /**
  * Local multilingual NER via @xenova/transformers token-classification.
@@ -96,7 +97,7 @@ export class LocalNerService implements OnModuleInit {
   private async warmup(): Promise<void> {
     const start = Date.now();
     try {
-      const transformers = await import('@xenova/transformers');
+      const transformers = await importTransformers();
       this.classifier = (await transformers.pipeline(
         'token-classification',
         this.modelId,

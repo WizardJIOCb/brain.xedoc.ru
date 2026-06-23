@@ -1,0 +1,55 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2.3.10
+    user: root
+    command:
+      - start
+      - --user=root
+      - --pass=${SURREALDB_PASSWORD:-root}
+      - --bind=0.0.0.0:8000
+      - rocksdb:/data/db
+    expose:
+      - "8000"
+    volumes:
+      - surrealdb-data:/data/db
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  brain:
+    build: .
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      SURREALDB_URL: ws://surrealdb:8000
+      SURREALDB_USERNAME: root
+      SURREALDB_PASSWORD: ${SURREALDB_PASSWORD:-root}
+      SURREALDB_NAMESPACE: brain
+      SURREALDB_SCOPED_USER: brain_caller
+      SURREALDB_SCOPED_PASS: ${SURREALDB_SCOPED_PASS}
+      BRAIN_BASELINES_DIR: /app/.cache/baselines
+      EMBEDDER_PROVIDER: ${EMBEDDER_PROVIDER:-bge-m3}
+    ports:
+      - "127.0.0.1:${BRAIN_HOST_PORT:-3031}:3000"
+    mem_limit: 3g
+    mem_reservation: 768m
+    cpus: 2.0
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+
+volumes:
+  surrealdb-data:

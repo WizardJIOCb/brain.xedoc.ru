@@ -536,9 +536,9 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     try {
+      const passwordLiteral = JSON.stringify(scopedPass);
       await this.migratorConn.query(
-        `DEFINE USER OVERWRITE ${scopedUser} ON NAMESPACE PASSWORD $pass ROLES EDITOR`,
-        { pass: scopedPass },
+        `DEFINE USER OVERWRITE ${scopedUser} ON NAMESPACE PASSWORD ${passwordLiteral} ROLES EDITOR`,
       );
       this.logger.log(`Reset password for scoped user '${scopedUser}'`);
     } catch (err) {
