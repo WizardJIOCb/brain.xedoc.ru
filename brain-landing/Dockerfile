@@ -13,11 +13,10 @@ WORKDIR /app
 # pnpm via corepack — same channel the rest of the repo uses.
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
-# Deps first for cache hits. `--ignore-workspace` makes the build
-# standalone — pnpm-lock.yaml in this folder is the source of truth,
-# the enclosing /Users/.../Documents/pnpm-workspace.yaml is ignored.
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --ignore-workspace
+# Deps first for cache hits. pnpm-workspace.yaml makes this folder its own
+# workspace root, so the local pnpm-lock.yaml is the single source of truth.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 
 # Then sources.
 COPY tsconfig.json next.config.js postcss.config.js tailwind.config.js next-env.d.ts mdx-components.tsx ./
@@ -42,8 +41,8 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
 # Only what's needed at runtime.
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --ignore-workspace --prod
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
 
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public

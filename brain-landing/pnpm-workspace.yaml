@@ -1,0 +1,6 @@
+# Makes brain-landing a self-contained pnpm workspace root. pnpm stops
+# walking up the filesystem here, so installs never attach to an enclosing
+# workspace (e.g. a stray ~/Documents/pnpm-workspace.yaml on a dev machine)
+# and pnpm-lock.yaml in this folder stays the single source of truth.
+# This is why CI and the Dockerfile no longer need --ignore-workspace.
+packages: []
