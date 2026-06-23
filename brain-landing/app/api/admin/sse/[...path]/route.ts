@@ -28,6 +28,7 @@ function isAllowed(path: string): boolean {
 }
 
 async function getToken(): Promise<string> {
+  if (process.env.BRAIN_SERVICE_KEY) return process.env.BRAIN_SERVICE_KEY
   const auth = process.env.AUTH_SERVICE_URL || 'https://auth.inite.ai'
   const clientId = process.env.OAUTH_CLIENT_ID || 'brain-landing'
   const clientSecret = process.env.OAUTH_CLIENT_SECRET || ''

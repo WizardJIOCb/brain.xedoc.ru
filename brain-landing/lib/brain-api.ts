@@ -35,6 +35,7 @@ const CLIENT_ID =
   'brain-landing'
 
 const CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || ''
+const BRAIN_SERVICE_KEY = process.env.BRAIN_SERVICE_KEY || ''
 
 const BRAIN_AUDIENCE = process.env.BRAIN_AUDIENCE || 'brain'
 const BRAIN_SCOPE =
@@ -83,6 +84,7 @@ async function fetchServiceToken(): Promise<CachedToken> {
 }
 
 async function getServiceToken(): Promise<string> {
+  if (BRAIN_SERVICE_KEY) return BRAIN_SERVICE_KEY
   if (cached && cached.expiresAtMs > Date.now()) {
     return cached.accessToken
   }

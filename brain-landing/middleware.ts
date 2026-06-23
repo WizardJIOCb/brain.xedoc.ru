@@ -14,6 +14,7 @@ import { jwtVerify, createRemoteJWKSet } from 'jose'
  */
 
 const ADMIN_PATH_RE = /^\/(en|ru)?\/?admin(\/|$)/
+const SELF_HOSTED_SESSION_COOKIE = 'brain_admin_session'
 
 const AUTH_DOMAIN =
   process.env.AUTH_SERVICE_URL ||
@@ -42,6 +43,39 @@ function loginRedirect(req: NextRequest): NextResponse {
   return NextResponse.redirect(url)
 }
 
+function base64url(input: ArrayBuffer): string {
+  const bytes = new Uint8Array(input)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+async function verifySelfHostedSession(token: string | undefined): Promise<boolean> {
+  if (!token) return false
+  const secret = process.env.ADMIN_SESSION_SECRET
+  if (!secret || secret.length < 32) return false
+  const [payload, signature] = token.split('.')
+  if (!payload || !signature) return false
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const expected = base64url(
+    await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload)),
+  )
+  if (signature !== expected) return false
+  try {
+    const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'))
+    const session = JSON.parse(json) as { exp?: number }
+    return Boolean(session.exp && session.exp >= Math.floor(Date.now() / 1000))
+  } catch {
+    return false
+  }
+}
+
 async function isAdminToken(token: string): Promise<boolean> {
   try {
     const { payload } = await jwtVerify(token, JWKS, {
@@ -66,6 +100,13 @@ export async function middleware(req: NextRequest) {
 
   if (process.env.ADMIN_DEV_BYPASS === '1') {
     return NextResponse.next()
+  }
+
+  if (process.env.SELF_HOSTED_ADMIN === '1') {
+    const allowed = await verifySelfHostedSession(
+      req.cookies.get(SELF_HOSTED_SESSION_COOKIE)?.value,
+    )
+    return allowed ? NextResponse.next() : loginRedirect(req)
   }
 
   const token = req.cookies.get('access_token')?.value

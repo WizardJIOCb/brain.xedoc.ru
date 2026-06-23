@@ -1,0 +1,19 @@
+services:
+  brain-landing:
+    build:
+      context: ./brain-landing
+      args:
+        NEXT_PUBLIC_BRAIN_API_URL: ${NEXT_PUBLIC_BRAIN_API_URL:-https://brain.xedoc.ru}
+    env_file:
+      - .env.landing
+    environment:
+      NODE_ENV: production
+      PORT: 3030
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://brain.xedoc.ru}
+      NEXT_PUBLIC_BRAIN_API_URL: ${NEXT_PUBLIC_BRAIN_API_URL:-https://brain.xedoc.ru}
+      BRAIN_API_URL: ${BRAIN_API_URL:-http://brain:3000}
+      SELF_HOSTED_ADMIN: ${SELF_HOSTED_ADMIN:-1}
+    ports:
+      - "127.0.0.1:${LANDING_HOST_PORT:-3032}:3030"
+    restart: unless-stopped

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { SELF_HOSTED_SESSION_COOKIE } from '@/lib/self-hosted-session'
 
 /**
  * POST /api/auth/logout
@@ -20,6 +21,7 @@ export async function POST(request: NextRequest) {
   const res = NextResponse.redirect(dest)
   res.cookies.set('access_token', '', { path: '/', maxAge: 0 })
   res.cookies.set('refresh_token', '', { path: '/', maxAge: 0 })
+  res.cookies.set(SELF_HOSTED_SESSION_COOKIE, '', { path: '/', maxAge: 0 })
   return res
 }
 

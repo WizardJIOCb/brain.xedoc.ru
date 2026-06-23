@@ -6,6 +6,10 @@
 import 'server-only'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyAccessToken, isAdminFromToken } from './jwt-verify'
+import {
+  SELF_HOSTED_SESSION_COOKIE,
+  verifySelfHostedSession,
+} from './self-hosted-session'
 
 export interface AdminSession {
   userId: string
@@ -41,6 +45,18 @@ function devBypass(): AdminSession | null {
 export async function getAdminSession(
   request: NextRequest,
 ): Promise<AdminSession | null> {
+  if (process.env.SELF_HOSTED_ADMIN === '1') {
+    const session = verifySelfHostedSession(
+      request.cookies.get(SELF_HOSTED_SESSION_COOKIE)?.value,
+    )
+    if (!session) return null
+    return {
+      userId: session.userId,
+      email: session.email,
+      isAdmin: true,
+    }
+  }
+
   const bypass = devBypass()
   if (bypass) return bypass
 
