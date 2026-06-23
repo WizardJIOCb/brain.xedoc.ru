@@ -1,0 +1,52 @@
+{
+  "name": "@inite/brain-mcp",
+  "version": "0.1.0",
+  "description": "First-party stdio MCP connector for the INITE Brain service. Lets stdio-only harnesses that can't attach auth headers (e.g. openclaw, Goose 1.x) use brain as long-term memory by transparently proxying every scoped tool over Streamable HTTP with Bearer auth. Harnesses with native remote MCP (Hermes, Claude Desktop, Cursor) connect directly by URL instead.",
+  "author": "INITE",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inite-ai/inite-brain-service.git",
+    "directory": "clients/brain-mcp"
+  },
+  "homepage": "https://brain.inite.ai",
+  "bugs": {
+    "url": "https://github.com/inite-ai/inite-brain-service/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "brain",
+    "memory",
+    "stdio",
+    "bridge",
+    "inite"
+  ],
+  "bin": {
+    "brain-mcp": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}
