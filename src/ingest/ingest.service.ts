@@ -306,6 +306,7 @@ export class IngestService {
     if (outcome) this.metrics?.countIngestFact(String(outcome));
   }
 
+
   private sourceTrustFor(source: { vertical: string; eventId?: string; messageId?: string }): number {
     // Heuristic: derive a trust label from source shape.
     if (source.eventId?.startsWith('billing.'))   return SOURCE_TRUST.billing_event;

@@ -8,6 +8,7 @@ import { FactsService } from '../facts/facts.service';
 import { MultiHopService } from '../multi-hop/multi-hop.service';
 import { SynthesizeService } from '../synthesize/synthesize.service';
 import { MemoryDiffService } from '../diff/memory-diff.service';
+import { IngestPredictionService } from '../ingest/ingest-predictor.service';
 import { BrainScope } from '../auth/api-key.types';
 
 /**
@@ -31,6 +32,7 @@ export class McpService {
     private readonly multiHop: MultiHopService,
     private readonly synth: SynthesizeService,
     private readonly memoryDiff: MemoryDiffService,
+    private readonly predictor: IngestPredictionService,
   ) {}
 
   buildServer(companyId: string, scopes: BrainScope[]): McpServer {
@@ -304,6 +306,45 @@ export class McpService {
         const out = await this.facts.listCompeting(companyId, args.entityId, {
           predicate: args.predicate,
           asOf: args.asOf,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
+          structuredContent: out as any,
+        };
+      },
+    );
+
+    // ── detect_contradiction ──────────────────────────────────────────
+    server.registerTool(
+      'detect_contradiction',
+      {
+        title: 'Predict the conflict-resolver outcome for a candidate fact',
+        description:
+          "Dry-run preflight against fn::resolve_fact. Answers \"if I were to record this fact right now, what would the resolver decide?\" without writing to the database. wouldOutcome ∈ {INSERTED, SUPERSEDED, COMPETING, REJECTED}; reasoning explains which rule fired (semantics class, score gap vs margin, cosine threshold, etc); opposingFacts lists the same-predicate priors the resolver would have weighed against. Use before record_fact when the cost of a contested write is high (e.g. agent loops that pay an ingest credit). Fidelity: source_trust uses the seed table, not the learned per-tenant rate from migration 0022 — predictions can differ from the live resolver when an operator has tuned source_trust against extraction quality.",
+        inputSchema: {
+          entityRef: z.union([
+            z.object({ vertical: z.string(), id: z.string() }),
+            z.object({ entityId: z.string() }),
+          ]),
+          predicate: z.string(),
+          object: z.string(),
+          validFrom: z.string().datetime(),
+          validUntil: z.string().datetime().optional(),
+          confidence: z.number().min(0).max(1).optional(),
+          sourceVertical: z
+            .string()
+            .describe('Vertical attributed as source (matches record_fact)'),
+        },
+      },
+      async (args) => {
+        const out = await this.predictor.predict(companyId, {
+          entityRef: args.entityRef as any,
+          predicate: args.predicate,
+          object: args.object,
+          validFrom: args.validFrom,
+          validUntil: args.validUntil,
+          confidence: args.confidence,
+          source: { vertical: args.sourceVertical },
         });
         return {
           content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
