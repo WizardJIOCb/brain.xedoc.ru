@@ -1,0 +1,85 @@
+name: PR requirements
+
+# When CI finishes on a pull request, keep a single sticky comment in sync:
+# if CI is red, post the merge requirements (the four hard bars from
+# CONTRIBUTING + the conventional-title check); when CI goes green, replace it
+# with a pass note. Uses workflow_run so it also works for fork PRs (the token
+# is the base repo's, with write access). Templated — no AI, fully deterministic.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  notify:
+    # Only for PR-triggered CI runs (not pushes to main).
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+          PAYLOAD_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          # Dependabot PRs get their own checks; don't nag them.
+          case "$HEAD_BRANCH" in
+            dependabot/*) echo "skip=1" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          n="$PAYLOAD_PR"
+          # Fork PRs have an empty pull_requests array — look it up by head.
+          if [ -z "$n" ]; then
+            n=$(gh api "repos/$GH_REPO/pulls?state=open&head=$HEAD_OWNER:$HEAD_BRANCH" -q '.[0].number')
+          fi
+          echo "number=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Sync requirements comment
+        if: ${{ steps.pr.outputs.skip != '1' && steps.pr.outputs.number != '' && steps.pr.outputs.number != 'null' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          PR: ${{ steps.pr.outputs.number }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          MARKER='<!-- pr-requirements -->'
+          id=$(gh api "repos/$GH_REPO/issues/$PR/comments" --paginate \
+                 -q "[.[] | select(.body | startswith(\"$MARKER\")) | .id][0]")
+
+          if [ "$CONCLUSION" = "success" ]; then
+            # Nothing to nag about — clear an existing note, otherwise stay quiet.
+            if [ -n "$id" ] && [ "$id" != "null" ]; then
+              {
+                printf '%s\n' "$MARKER"
+                printf '✅ All CI checks are green — thanks! This PR meets the automated bars.\n'
+              } > body.md
+              jq -Rs '{body: .}' body.md | gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" --input -
+            fi
+            exit 0
+          fi
+
+          # CI is red (failure / timed_out / cancelled) — post or update the checklist.
+          {
+            printf '%s\n' "$MARKER"
+            printf '## ❌ CI is red — a few things before this can merge\n\n'
+            printf 'Thanks for the contribution! Per the [contributing guide](%s/%s/blob/main/CONTRIBUTING.md), every PR has four hard bars:\n\n' "$SERVER" "$GH_REPO"
+            printf '1. **Tests pass** — `pnpm test` and the retrieval **eval gate** must be green.\n'
+            printf '2. **Migrations are append-only** — schema changes ship as a new numbered `src/db/migrations/NNNN_*.surql`; never edit a shipped migration.\n'
+            printf '3. **No new dependencies without justification** — call out the why in the PR description.\n'
+            printf '4. **Conventional PR title** — the `lint-pr-title` check requires it (e.g. `fix: ...`, `feat: ...`, `docs: ...`).\n\n'
+            printf 'Open the [failing run](%s), push fixes, and this note clears itself automatically when CI goes green.\n' "$RUN_URL"
+          } > body.md
+          if [ -n "$id" ] && [ "$id" != "null" ]; then
+            jq -Rs '{body: .}' body.md | gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" --input -
+          else
+            jq -Rs '{body: .}' body.md | gh api -X POST "repos/$GH_REPO/issues/$PR/comments" --input -
+          fi
