@@ -4,6 +4,25 @@ How to land `inite-brain-service` in the directories and awesome lists that MCP 
 
 This file is the source of truth — keep the row text and form fields here so the next push (new tool surface, new version) needs only a search-and-replace.
 
+## Fast-path automation
+
+For the Tier 1-2 awesome-list PRs, `scripts/submit-awesome.sh` automates fork + clone + insert + commit + draft-PR for the 5 most-impactful targets:
+
+```bash
+scripts/submit-awesome.sh --list                    # show targets
+scripts/submit-awesome.sh --only punkpeye           # dry-run — clones into
+                                                    # /tmp/inite-awesome-submissions
+                                                    # and prints the diff
+scripts/submit-awesome.sh --only punkpeye --apply   # commits + pushes + opens draft PR
+scripts/submit-awesome.sh --all --apply             # all 5 targets in sequence
+```
+
+Requires `gh` authenticated as the GitHub user opening the PRs (currently `Mikefluff`). Fork names are namespaced (`<repo>-from-<upstream-owner>`) so two `awesome-mcp-servers` lists don't collide. Re-running on the same target is idempotent — the script bails if the row is already present.
+
+The script handles: punkpeye / topoteretes / surrealdb / webfuse / appcypher.
+
+For everything else (Tier 3 lists, mcpservers.org form, official Registry, PulseMCP) — use the manual steps below.
+
 ## Status (update on every push)
 
 | Target | Status | URL when live |
