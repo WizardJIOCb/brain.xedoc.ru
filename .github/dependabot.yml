@@ -22,9 +22,24 @@ updates:
       landing-minor:
         update-types: ["minor", "patch"]
 
-  # GitHub Actions
+  # MCP connector (@inite/brain-mcp) — standalone npm package
+  - package-ecosystem: npm
+    directory: /clients/brain-mcp
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "area: brain-mcp"]
+    groups:
+      brain-mcp-minor:
+        update-types: ["minor", "patch"]
+
+  # GitHub Actions — bumps the pinned SHAs (keeps the # vX comment in sync)
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
     labels: ["dependencies"]
+    groups:
+      actions:
+        update-types: ["minor", "patch"]
