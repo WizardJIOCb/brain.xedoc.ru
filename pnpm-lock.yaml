@@ -69,8 +69,8 @@ importers:
         specifier: ^8.0.0
         version: 8.1.0
       jose:
-        specifier: ^5.10.0
-        version: 5.10.0
+        specifier: ^6.2.3
+        version: 6.2.3
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -3334,9 +3334,6 @@ packages:
     peerDependenciesMeta:
       node-notifier:
         optional: true
-
-  jose@5.10.0:
-    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   jose@6.2.3:
     resolution: {integrity: sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw==}
@@ -8637,8 +8634,6 @@ snapshots:
       - babel-plugin-macros
       - supports-color
       - ts-node
-
-  jose@5.10.0: {}
 
   jose@6.2.3: {}
 
